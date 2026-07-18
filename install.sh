@@ -131,6 +131,17 @@ fi
 # HTTP-01 требует, чтобы публичный DNS указывал на этот хост.
 if [ "$SKIP_DNS_CHECK" -eq 0 ]; then
     resolved="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')" || true
+    # Локальный резолвер может не видеть запись (кэш, свой DNS, dynamic DNS),
+    # а Let's Encrypt смотрит публичный. Поэтому при пустом ответе спрашиваем
+    # публичные резолверы и падаем только если запись не видит вообще никто.
+    if [ -z "$resolved" ] && command -v dig >/dev/null 2>&1; then
+        for ns in 1.1.1.1 8.8.8.8; do
+            resolved="$(dig +short +time=5 +tries=1 "@$ns" "$DOMAIN" A 2>/dev/null \
+                | grep -m1 -E '^[0-9.]+$')" || true
+            [ -n "$resolved" ] && break
+        done
+        [ -n "$resolved" ] && warn "$DOMAIN виден в публичном DNS ($resolved), но не резолвится на этом хосте"
+    fi
     public_ip="$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null)" || true
     if [ -z "$resolved" ]; then
         die "$DOMAIN не резолвится. Для HTTP-01 нужна A-запись на этот хост (обойти: --skip-dns-check)"
