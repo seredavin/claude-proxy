@@ -1,0 +1,30 @@
+services:
+  claude-proxy:
+    image: nginx:1.27-alpine
+    container_name: claude-proxy
+    restart: unless-stopped
+    ports:
+      - "9443:9443"
+    environment:
+      GATEWAY_MODE: "${GATEWAY_MODE:-apikey}"
+      GATEWAY_TOKEN: "${GATEWAY_TOKEN:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      PROXY_SERVER_NAME: "${PROXY_SERVER_NAME:-_}"
+      PROXY_SSL_CERT: "${PROXY_SSL_CERT:-fullchain.pem}"
+      PROXY_SSL_KEY: "${PROXY_SSL_KEY:-privkey.pem}"
+      NGINX_ENVSUBST_OUTPUT_DIR: "/etc/nginx/conf.d"
+    volumes:
+      - ./templates-available:/etc/nginx/templates-available:ro
+      - ./docker-entrypoint.d/10-select-mode.sh:/docker-entrypoint.d/10-select-mode.sh:ro
+      - ${PROXY_CERTS_DIR:-/opt/proxy-certs}:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--no-check-certificate", "https://127.0.0.1:9443/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
