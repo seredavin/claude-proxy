@@ -182,11 +182,39 @@ else
     die "поддерживаются только apt и dnf; поставьте docker, docker compose и certbot вручную"
 fi
 
+# Обёртка над apt-get. Две защиты от зависания:
+#   1. </dev/null — ни один хук не сможет ждать ввода. Через bootstrap.sh
+#      скрипту отдан живой /dev/tty, поэтому интерактивный хук честно ждёт
+#      человека и установка встаёт молча.
+#   2. timeout — если apt всё же завис, падаем с внятным сообщением.
+apt_get() {
+    # timeout есть в coreutils, но на урезанных образах может не быть —
+    # тогда работаем без него, защита через </dev/null всё равно остаётся.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 900 apt-get "$@" </dev/null
+    else
+        apt-get "$@" </dev/null
+    fi || die "apt-get $1 не завершился (код $?). Проверьте: needrestart, dpkg --configure -a"
+}
+
+# needrestart после обновления libcurl/libssl показывает диалог «какие сервисы
+# перезапустить». Переменной NEEDRESTART_MODE оказалось недостаточно —
+# кладём конфиг, его хук читает гарантированно.
+disable_needrestart() {
+    [ -d /etc/needrestart/conf.d ] || return 0
+    cat > /etc/needrestart/conf.d/99-claude-proxy.conf <<'EOF'
+# Установка claude-proxy: перезапускать сервисы автоматически, без вопросов.
+$nrconf{restart} = 'a';
+$nrconf{kernelhints} = 0;
+EOF
+}
+
 install_docker() {
     log "Ставлю Docker из официального репозитория"
     if [ "$PKG" = apt ]; then
-        apt-get update -qq
-        apt-get install -y -qq ca-certificates curl gnupg
+        disable_needrestart
+        apt_get update -qq
+        apt_get install -y -qq ca-certificates curl gnupg
         install -m 0755 -d /etc/apt/keyrings
         # --max-time обязателен: без него на отфильтрованной сети curl висит вечно.
         curl -fsSL --connect-timeout 10 --max-time 60 \
@@ -197,8 +225,8 @@ install_docker() {
         cat > /etc/apt/sources.list.d/docker.list <<EOF
 deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") $(. /etc/os-release && echo "$VERSION_CODENAME") stable
 EOF
-        apt-get update -qq
-        apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        apt_get update -qq
+        apt_get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
     else
         dnf install -y -q dnf-plugins-core
         dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null \
@@ -221,7 +249,8 @@ ok "docker $(docker --version | awk '{print $3}' | tr -d ,)"
 if ! command -v certbot >/dev/null 2>&1; then
     log "Ставлю certbot"
     if [ "$PKG" = apt ]; then
-        apt-get install -y -qq certbot
+        disable_needrestart
+        apt_get install -y -qq certbot
     else
         dnf install -y -q certbot
     fi
