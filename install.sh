@@ -9,6 +9,14 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# apt должен работать молча. DEBIAN_FRONTEND глушит debconf, но не needrestart:
+# тот после обновления libcurl/libssl показывает диалог «какие сервисы
+# перезапустить» и ждёт ввода. NEEDRESTART_MODE=a перезапускает их сам.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 readonly CERTS_DIR=/opt/proxy-certs
 readonly HOOK_PATH=/etc/letsencrypt/renewal-hooks/deploy/claude-proxy.sh
 
@@ -166,12 +174,14 @@ fi
 install_docker() {
     log "Ставлю Docker из официального репозитория"
     if [ "$PKG" = apt ]; then
-        export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get install -y -qq ca-certificates curl gnupg
         install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL "https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg" \
-            | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+        # --max-time обязателен: без него на отфильтрованной сети curl висит вечно.
+        curl -fsSL --connect-timeout 10 --max-time 60 \
+            "https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg" \
+            | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg \
+            || die "не удалось получить ключ download.docker.com — репозиторий недоступен с этого хоста"
         chmod a+r /etc/apt/keyrings/docker.gpg
         cat > /etc/apt/sources.list.d/docker.list <<EOF
 deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") $(. /etc/os-release && echo "$VERSION_CODENAME") stable
@@ -200,7 +210,7 @@ ok "docker $(docker --version | awk '{print $3}' | tr -d ,)"
 if ! command -v certbot >/dev/null 2>&1; then
     log "Ставлю certbot"
     if [ "$PKG" = apt ]; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot
+        apt-get install -y -qq certbot
     else
         dnf install -y -q certbot
     fi
