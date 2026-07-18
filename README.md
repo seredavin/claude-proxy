@@ -95,20 +95,190 @@ nginx в `templates-available/`.
 docker compose up -d --force-recreate
 ```
 
-## Развёртывание
+## Установка
+
+### Шаг 0. Предварительные условия
+
+На хосте прокси:
+
+* Docker Engine и плагин Compose (`docker compose version`)
+* Разрешённый исход на `api.anthropic.com:443` — проверяется до всего
+  остального, иначе диагностика на шаге 5 будет вводить в заблуждение:
+
+  ```bash
+  curl -sS -o /dev/null -w '%{http_code}\n' https://api.anthropic.com/v1/messages
+  # 401 — сеть в порядке (Anthropic отверг запрос без ключа, но ответил)
+  # зависание или connection refused — исход закрыт, дальше идти бессмысленно
+  ```
+* Свободный порт `9443`, доступный из внутренней сети
+
+На клиентах: имя прокси должно резолвиться (внутренний DNS или `/etc/hosts`).
+
+### Шаг 1. Выбор имени
+
+Имя, по которому клиенты будут обращаться к прокси, должно совпадать в трёх
+местах, иначе TLS не соберётся:
+
+1. `PROXY_SERVER_NAME` в `.env`
+2. CN/SAN сертификата
+3. `ANTHROPIC_BASE_URL` на клиентах
+
+От выбора имени зависит и способ получить сертификат: для публичного домена
+(`claude-proxy.example.com`) доступен Let's Encrypt, для внутреннего
+(`claude-proxy.internal`) — только собственный CA или самоподписанный.
+
+### Шаг 2. Сертификат
+
+Нужны два PEM-файла: цепочка (сертификат + промежуточные) и приватный ключ.
+Ниже четыре способа — выберите один.
+
+Проверить готовый сертификат перед запуском:
+
+```bash
+openssl x509 -in fullchain.pem -noout -subject -ext subjectAltName -dates
+```
+
+Имя из шага 1 должно быть в **subjectAltName**. Одного CN недостаточно:
+Node.js (а значит и Claude Code) игнорирует CN и проверяет только SAN —
+сертификат без него даст `ERR_TLS_CERT_ALTNAME_INVALID`.
+
+#### Вариант A. Let's Encrypt, DNS-01
+
+Публичный домен, но входящий трафик на прокси закрыт. Валидация идёт через
+TXT-запись в DNS, порты извне не нужны — единственный вариант LE для хоста
+в DMZ без входящих правил.
+
+```bash
+# пример для Cloudflare; плагины есть для большинства провайдеров
+apt install certbot python3-certbot-dns-cloudflare
+
+install -m 600 /dev/null /root/.secrets/cloudflare.ini
+cat > /root/.secrets/cloudflare.ini <<'EOF'
+dns_cloudflare_api_token = <API-ТОКЕН С ПРАВОМ ПРАВКИ ЗОНЫ>
+EOF
+
+certbot certonly \
+  --dns-cloudflare \
+  --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
+  -d claude-proxy.example.com
+```
+
+Цена варианта: на хосте прокси появляется API-токен от вашей DNS-зоны.
+Выдавайте его правами только на нужную зону.
+
+Домену необязательно резолвиться в адрес прокси — LE проверяет владение
+зоной, а не доступность хоста. Внутренние клиенты могут ходить по
+split-horizon DNS на приватный адрес.
+
+#### Вариант B. Let's Encrypt, HTTP-01
+
+Публичный домен и доступный из интернета порт 80. Проще всего, но требует
+входящего правила — часто несовместимо с политикой DMZ.
+
+```bash
+apt install certbot
+certbot certonly --standalone -d claude-proxy.example.com
+```
+
+Порт 80 нужен только на время выпуска и продления. Если на хосте уже висит
+веб-сервер — используйте `--webroot -w /var/www/html` вместо `--standalone`.
+
+#### Вариант C. Внутренний CA
+
+Корпоративный удостоверяющий центр, имя вида `claude-proxy.internal`.
+Генерируем ключ и CSR, CSR отдаём в CA:
+
+```bash
+openssl req -new -newkey rsa:2048 -nodes \
+  -keyout privkey.pem \
+  -out proxy.csr \
+  -subj "/CN=claude-proxy.internal" \
+  -addext "subjectAltName=DNS:claude-proxy.internal"
+```
+
+Из CA забираем подписанный сертификат и **собираем цепочку** — сначала
+сертификат сервера, затем промежуточные CA:
+
+```bash
+cat proxy.crt intermediate-ca.crt > fullchain.pem
+```
+
+Порядок важен. Корневой сертификат в цепочку не добавляется — он должен
+быть в доверенных на клиентах.
+
+Клиентам понадобится корневой CA — см. «Доверие к сертификату на клиентах».
+
+#### Вариант D. Самоподписанный
+
+Лаборатория и быстрая проверка схемы. Для постоянной эксплуатации не
+годится: отозвать такой сертификат нечем, а доверие раздаётся вручную.
+
+```bash
+openssl req -x509 -newkey rsa:4096 -nodes \
+  -keyout privkey.pem -out fullchain.pem -days 365 \
+  -subj "/CN=claude-proxy.internal" \
+  -addext "subjectAltName=DNS:claude-proxy.internal"
+```
+
+Если клиенты ходят по IP, SAN должен быть `IP:10.0.0.5`, а не `DNS:`.
+
+Клиентам понадобится сам этот файл — см. следующий раздел.
+
+### Шаг 3. Размещение файлов
+
+```bash
+mkdir -p /opt/proxy-certs
+cp fullchain.pem privkey.pem /opt/proxy-certs/
+chmod 600 /opt/proxy-certs/privkey.pem
+chmod 644 /opt/proxy-certs/fullchain.pem
+```
+
+nginx читает сертификаты мастер-процессом от root до сброса привилегий,
+поэтому `600` на ключе ему не мешает.
+
+**Для Let's Encrypt есть нюанс.** В `/etc/letsencrypt/live/<домен>/` лежат
+не файлы, а симлинки в `../../archive/`. Смонтировать только каталог `live`
+нельзя — внутри контейнера симлинки укажут в пустоту, и nginx не стартует.
+Два решения:
+
+*Смонтировать весь `/etc/letsencrypt`* — `PROXY_SSL_CERT` может содержать
+подпуть:
+
+```dotenv
+PROXY_CERTS_DIR=/etc/letsencrypt
+PROXY_SSL_CERT=live/claude-proxy.example.com/fullchain.pem
+PROXY_SSL_KEY=live/claude-proxy.example.com/privkey.pem
+```
+
+*Либо копировать в `/opt/proxy-certs` deploy-хуком* при каждом продлении —
+тогда переменные остаются дефолтными (см. «Эксплуатация»).
+
+### Шаг 4. Конфигурация
 
 ```bash
 cp .env.example .env
 $EDITOR .env
-chmod +x docker-entrypoint.d/10-select-mode.sh
-docker compose up -d
-docker compose logs --tail=30
 ```
+
+Заполнить: `GATEWAY_MODE`, `PROXY_SERVER_NAME` (имя из шага 1),
+пути к сертификатам (шаг 3), `GATEWAY_TOKEN`. В режиме `apikey` —
+ещё и `ANTHROPIC_API_KEY`.
 
 `GATEWAY_TOKEN` генерируется на хосте прокси:
 
 ```bash
 openssl rand -hex 32
+```
+
+Только hex — значение подставляется через `envsubst` прямо в текст
+nginx-конфига, и спецсимволы его сломают.
+
+### Шаг 5. Запуск и проверка
+
+```bash
+chmod +x docker-entrypoint.d/10-select-mode.sh
+docker compose up -d
+docker compose logs --tail=30
 ```
 
 Здоровый старт содержит:
@@ -119,11 +289,50 @@ openssl rand -hex 32
 start worker processes
 ```
 
-Проверка:
+Три проверки по возрастанию охвата:
 
 ```bash
+# 1. nginx жив, TLS терминируется
 curl -k https://127.0.0.1:9443/healthz     # ok
+
+# 2. сертификат отдаётся правильный и клиент ему доверяет
+curl https://claude-proxy.example.com:9443/healthz
+
+# 3. запрос доходит до Anthropic (в access-логе upstream=401, а не upstream=-)
+docker compose logs --tail=5 claude-proxy
 ```
+
+Вторая проверка без `-k` — именно она ловит несовпадение имени и
+недоверенный CA. Полный тест с реальным запросом делается только через CLI,
+см. «Диагностика».
+
+### Доверие к сертификату на клиентах
+
+Нужно для вариантов C и D — для Let's Encrypt всё работает из коробки.
+
+Claude Code работает на Node.js, а Node **не использует** системное
+хранилище сертификатов. Добавления CA в систему (`update-ca-certificates`,
+Keychain) недостаточно — нужна переменная окружения:
+
+```bash
+export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/internal-ca.crt
+```
+
+Для варианта C это корневой сертификат вашего CA, для варианта D — сам
+`fullchain.pem` с прокси. Файл должен быть в PEM.
+
+Проверка, что доверие настроено:
+
+```bash
+node -e "require('https').get('https://claude-proxy.internal:9443/healthz',
+  r => console.log(r.statusCode)).on('error', e => console.log(e.message))"
+# 200 — доверие есть
+# unable to verify the first certificate — цепочка неполна (см. вариант C)
+# self-signed certificate — NODE_EXTRA_CA_CERTS не подхватился
+```
+
+Переменную нужно выставлять в том же окружении, где запускается `claude` —
+пропишите её в профиль пользователя, а не разово в сессии.
 
 ## Настройка клиента
 
@@ -231,7 +440,36 @@ Anthropic здесь нет: они проходят транзитом и в л
 docker compose exec claude-proxy nginx -s reload
 ```
 
-Deploy-hook: `--deploy-hook "docker compose -f /root/claude-proxy/docker-compose.yml exec -T claude-proxy nginx -s reload"`
+Чтобы это происходило само, повесьте deploy-hook на certbot. Если вы
+монтируете `/etc/letsencrypt` целиком, хватит одного reload:
+
+```bash
+certbot renew --deploy-hook \
+  "docker compose -f /root/claude-proxy/docker-compose.yml exec -T claude-proxy nginx -s reload"
+```
+
+Если сертификаты копируются в `/opt/proxy-certs` (см. шаг 3), хук должен
+сначала копировать, потом перезагружать. Положите его файлом
+`/etc/letsencrypt/renewal-hooks/deploy/claude-proxy.sh` с `chmod +x` —
+тогда он отработает при любом `certbot renew`, в том числе из systemd-таймера:
+
+```bash
+#!/bin/sh
+set -e
+install -m 644 "$RENEWED_LINEAGE/fullchain.pem" /opt/proxy-certs/fullchain.pem
+install -m 600 "$RENEWED_LINEAGE/privkey.pem"   /opt/proxy-certs/privkey.pem
+docker compose -f /root/claude-proxy/docker-compose.yml exec -T claude-proxy nginx -s reload
+```
+
+Проверить, что продление отработает, не дожидаясь срока:
+
+```bash
+certbot renew --dry-run
+```
+
+Для варианта D (самоподписанный) автопродления нет — сертификат придётся
+перевыпускать руками и заново раздавать клиентам. Ещё один довод не
+использовать его дольше, чем для проверки схемы.
 
 Обратите внимание на асимметрию: сертификат подхватывается через reload,
 а изменения в `.env` — только через `--force-recreate`.
