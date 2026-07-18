@@ -97,12 +97,27 @@ docker compose up -d --force-recreate
 
 ## Установка
 
-### Быстрый путь: install.sh
+### Быстрый путь
 
 Если у вас публичный домен и открытый из интернета порт 80 — весь процесс
 ниже автоматизирован. Скрипт доставит docker и certbot, выпустит сертификат
 Let's Encrypt через HTTP-01, настроит автопродление, сгенерирует
-`GATEWAY_TOKEN`, соберёт `.env` и поднимет контейнер:
+`GATEWAY_TOKEN`, соберёт `.env` и поднимет контейнер.
+
+Одной командой:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/seredavin/claude-proxy/main/bootstrap.sh \
+  | sudo bash -s -- --domain proxy.example.com --email admin@example.com
+```
+
+Загрузчик клонирует репозиторий в `/opt/claude-proxy` и передаёт управление
+`install.sh`. Каталог переопределяется переменной `CLAUDE_PROXY_DIR`, ветка
+или тег — `CLAUDE_PROXY_REF`.
+
+Вы выполняете от root код, скачанный по сети, не прочитав его. Если это
+не отвечает вашим требованиям — тот же результат в два шага, с
+возможностью посмотреть, что именно запускается:
 
 ```bash
 git clone git@github.com:seredavin/claude-proxy.git
