@@ -384,12 +384,39 @@ node -e "require('https').get('https://claude-proxy.internal:9443/healthz',
 ```bash
 export ANTHROPIC_BASE_URL=https://claude-proxy.internal:9443
 export ANTHROPIC_CUSTOM_HEADERS="X-Gateway-Key: <GATEWAY_TOKEN>"
-export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
+export ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...
+# служебные обращения Claude Code (проверка fast mode, телеметрия) идут
+# напрямую на api.anthropic.com в обход шлюза — в изолированной сети они
+# недоступны и валят CLI на старте с "Unable to connect". Отключаем их:
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1
+export CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS=1
+unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY
 claude
 ```
 
 Порт в `ANTHROPIC_BASE_URL` обязателен — без него Node пойдёт на 443.
+
+**Токен подписки идёт через `ANTHROPIC_AUTH_TOKEN`, а не через
+`CLAUDE_CODE_OAUTH_TOKEN`.** Значение то же самое (`sk-ant-oat01-...`), но способ
+подачи критичен. `CLAUDE_CODE_OAUTH_TOKEN` переводит CLI в режим «залогинен по
+подписке»: часть служебных запросов (обновление токена, проверка fast mode)
+уходит напрямую на `api.anthropic.com`/`console.anthropic.com` мимо
+`ANTHROPIC_BASE_URL`. В сети без прямого интернета такой запрос упирается в
+блокировку/DPI и возвращает `ERR_BAD_REQUEST` — CLI падает ещё до первого
+обращения к шлюзу. Тот же токен, поданный как `ANTHROPIC_AUTH_TOKEN`, уходит
+обычным заголовком `Authorization: Bearer` **на base URL** — весь трафик, включая
+аутентификацию, идёт через прокси. Anthropic принимает `sk-ant-oat01-` и в
+`Authorization`, так что доступ к подписке сохраняется.
+
+Три флага `CLAUDE_CODE_*` глушат оставшийся служебный трафик, который иначе
+всё равно попытается достучаться до Anthropic напрямую:
+
+| Переменная | Что делает |
+|---|---|
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | Отключает телеметрию, проверку версий, feature-флаги, проверку fast mode |
+| `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1` | Пропускает проверку fast mode (сеть **перехватывает** запрос) |
+| `CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS=1` | Считает провал проверки fast mode успехом (сеть **отклоняет** соединение) |
 
 Токен подписки получается на машине с интернетом:
 
@@ -427,7 +454,7 @@ OAuth-токенов сторонними клиентами: голый curl п
 | Ответ | Где остановилось |
 |---|---|
 | `invalid gateway key` | nginx, не совпал `X-Gateway-Key` |
-| `missing oauth token` | nginx, CLI не подхватил `CLAUDE_CODE_OAUTH_TOKEN` |
+| `missing oauth token` | nginx, CLI не подхватил `ANTHROPIC_AUTH_TOKEN` |
 | `Invalid bearer token` + `request_id` | Anthropic, токен просрочен или отозван |
 
 В access-логе поле `upstream` показывает, дошло ли до Anthropic:
@@ -531,6 +558,9 @@ certbot renew --dry-run
   `resolver` — заставляет перечитывать DNS. Без переменной nginx резолвит
   IP один раз при старте и однажды молча отвалится.
 - `proxy_set_header X-Gateway-Key ""` — токен шлюза не уходит наверх.
+- `location = /` отвечает `200` без проверки ключа — это префлайт-зонд Claude
+  Code при старте (идёт без `X-Gateway-Key`). Иначе CLI получает `401` и падает
+  с «Unable to connect» до первого реального запроса.
 - `log_format proxy_fmt` не пишет заголовки — токены не попадают в логи.
 - `map` вместо прямого сравнения — точка расширения на случай, если
   понадобятся разные токены для разных команд.

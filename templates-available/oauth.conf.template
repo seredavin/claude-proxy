@@ -30,6 +30,16 @@ server {
         return 200 "ok\n";
     }
 
+    # Префлайт-проверка соединения Claude Code: при старте CLI шлёт на корень
+    # запрос БЕЗ токена шлюза (X-Gateway-Key). Если ответить 401, клиент считает
+    # шлюз недоступным и падает с "Unable to connect" ещё до первого запроса.
+    # Отдаём 200. Реальный трафик идёт на /v1/... и проходит проверку ключа ниже.
+    location = / {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
     location / {
         if ($gw_ok = 0) {
             return 401 '{"type":"error","error":{"type":"authentication_error","message":"invalid gateway key"}}';

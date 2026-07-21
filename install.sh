@@ -403,8 +403,13 @@ EOF
 if [ "$MODE" = oauth ]; then
     cat <<EOF
   export ANTHROPIC_CUSTOM_HEADERS="X-Gateway-Key: $GATEWAY_TOKEN"
-  export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # получить: claude setup-token
-  unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
+  export ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...   # получить: claude setup-token
+  # служебный трафик Claude Code идёт мимо шлюза напрямую на Anthropic —
+  # в изолированной сети его надо отключить, иначе CLI падает на старте:
+  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+  export CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1
+  export CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS=1
+  unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY
 EOF
 else
     cat <<EOF
