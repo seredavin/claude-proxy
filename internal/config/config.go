@@ -64,6 +64,10 @@ type Config struct {
 	APIKey   string
 	Upstream *url.URL
 
+	// UpstreamKey — пропуск на следующий шлюз, когда апстрим не Anthropic,
+	// а ещё один claude-proxy. Уходит наверх в X-Gateway-Key.
+	UpstreamKey string
+
 	TLS      TLSSource
 	CertFile string
 	KeyFile  string
@@ -86,6 +90,7 @@ type Raw struct {
 	Tokens        string
 	APIKey        string
 	Upstream      string
+	UpstreamKey   string
 	TLS           string
 	CertFile      string
 	KeyFile       string
@@ -115,6 +120,7 @@ func (r *Raw) bindings() []binding {
 		{&r.Tokens, "tokens", []string{"CLAUDE_PROXY_TOKENS", "GATEWAY_TOKEN"}},
 		{&r.APIKey, "api-key", []string{"CLAUDE_PROXY_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"}},
 		{&r.Upstream, "upstream", []string{"CLAUDE_PROXY_UPSTREAM"}},
+		{&r.UpstreamKey, "upstream-key", []string{"CLAUDE_PROXY_UPSTREAM_KEY"}},
 		{&r.TLS, "tls", []string{"CLAUDE_PROXY_TLS"}},
 		{&r.CertFile, "cert-file", []string{"CLAUDE_PROXY_CERT_FILE", "PROXY_SSL_CERT"}},
 		{&r.KeyFile, "key-file", []string{"CLAUDE_PROXY_KEY_FILE", "PROXY_SSL_KEY"}},
@@ -125,6 +131,20 @@ func (r *Raw) bindings() []binding {
 		{&r.MaxBody, "max-body", []string{"CLAUDE_PROXY_MAX_BODY"}},
 		{&r.LogFormat, "log-format", []string{"CLAUDE_PROXY_LOG_FORMAT"}},
 	}
+}
+
+// ManagedEnvKeys возвращает имена переменных, которыми распоряжается сам
+// claude-proxy: основные и legacy-алиасы. Всё, чего нет в этом списке,
+// в EnvironmentFile поставил оператор.
+func ManagedEnvKeys() []string {
+	var r Raw
+	var keys []string
+	for _, b := range r.bindings() {
+		keys = append(keys, b.envs...)
+	}
+	// Разбирается не через binding, а отдельно в ApplyEnv, но переносить
+	// её из nginx-версии тоже незачем.
+	return append(keys, "PROXY_CERTS_DIR")
 }
 
 // Defaults возвращает Raw со значениями по умолчанию.
@@ -152,6 +172,8 @@ func Bind(fs *flag.FlagSet) *Raw {
 	fs.StringVar(&r.Tokens, "tokens", d.Tokens, "токены шлюза: \"метка:значение\" через запятую")
 	fs.StringVar(&r.APIKey, "api-key", d.APIKey, "ключ Anthropic Console, только для --mode apikey")
 	fs.StringVar(&r.Upstream, "upstream", d.Upstream, "базовый URL Anthropic API")
+	fs.StringVar(&r.UpstreamKey, "upstream-key", d.UpstreamKey,
+		"пропуск на следующий шлюз в цепочке; уходит наверх как X-Gateway-Key")
 	fs.StringVar(&r.TLS, "tls", d.TLS, "источник сертификата: auto | files | self")
 	fs.StringVar(&r.CertFile, "cert-file", d.CertFile, "PEM с цепочкой сертификатов, для --tls files")
 	fs.StringVar(&r.KeyFile, "key-file", d.KeyFile, "PEM с приватным ключом, для --tls files")
@@ -212,6 +234,7 @@ func Resolve(r Raw) (*Config, error) {
 		ACMEHTTP:      strings.TrimSpace(r.ACMEHTTP),
 		ACMEDirectory: strings.TrimSpace(r.ACMEDirectory),
 		StateDir:      strings.TrimSpace(r.StateDir),
+		UpstreamKey:   strings.TrimSpace(r.UpstreamKey),
 		LogFormat:     strings.TrimSpace(r.LogFormat),
 	}
 
@@ -280,6 +303,13 @@ func (c *Config) validate() error {
 		return fmt.Errorf("не задан ни один токен шлюза (--tokens, CLAUDE_PROXY_TOKENS; сгенерировать: claude-proxy gen-token)")
 	}
 
+	// Anthropic про X-Gateway-Key ничего не знает и молча его проигнорирует —
+	// заданный ключ при дефолтном апстриме значит, что цепочку настроили
+	// наполовину: забыли переставить --upstream на следующее звено.
+	if c.UpstreamKey != "" && isAnthropicHost(c.Upstream.Hostname()) {
+		return fmt.Errorf("--upstream-key имеет смысл только когда апстрим — другой claude-proxy; для %s он бесполезен", UpstreamHost)
+	}
+
 	switch c.Mode {
 	case ModeAPIKey:
 		if c.APIKey == "" {
@@ -328,6 +358,13 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+// isAnthropicHost отвечает, ведёт ли имя на сам Anthropic. Регистр и
+// завершающая точка в имени хоста ничего не меняют для DNS, но url.Parse
+// оставляет их как есть, а обычное сравнение строк на них спотыкается.
+func isAnthropicHost(host string) bool {
+	return strings.EqualFold(strings.TrimSuffix(host, "."), UpstreamHost)
 }
 
 // parseSize разбирает размер с необязательным суффиксом k, m или g.

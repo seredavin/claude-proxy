@@ -4,3 +4,4 @@ dist
 docs
 *.md
 claude-proxy
+scripts

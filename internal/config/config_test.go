@@ -188,6 +188,16 @@ func TestОшибкиВалидации(t *testing.T) {
 			want: "upstream должен быть https",
 		},
 		{
+			name: "пропуск на следующее звено при дефолтном апстриме",
+			args: []string{"--tokens", "a", "--tls", "files", "--cert-file", "c.pem", "--key-file", "k.pem", "--upstream-key", "next"},
+			want: "--upstream-key имеет смысл только",
+		},
+		{
+			name: "пропуск на следующее звено при дефолтном апстриме в другом регистре",
+			args: []string{"--tokens", "a", "--tls", "files", "--cert-file", "c.pem", "--key-file", "k.pem", "--upstream", "https://API.Anthropic.COM.", "--upstream-key", "next"},
+			want: "--upstream-key имеет смысл только",
+		},
+		{
 			name: "мусор в max-body",
 			args: []string{"--tokens", "a", "--tls", "files", "--cert-file", "c.pem", "--key-file", "k.pem", "--max-body", "много"},
 			want: "max-body",
@@ -252,5 +262,23 @@ func TestДефолтыПоУмолчанию(t *testing.T) {
 	}
 	if cfg.MaxBodyBytes != 100<<20 {
 		t.Errorf("MaxBodyBytes = %d", cfg.MaxBodyBytes)
+	}
+}
+
+func TestUpstreamKeyFromEnv(t *testing.T) {
+	cfg, _, err := load(t,
+		[]string{"--tokens", "a", "--tls", "files", "--cert-file", "c.pem", "--key-file", "k.pem"},
+		map[string]string{
+			"CLAUDE_PROXY_UPSTREAM":     "https://edge.example.com:9443",
+			"CLAUDE_PROXY_UPSTREAM_KEY": " next-secret ",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Upstream.Host != "edge.example.com:9443" {
+		t.Errorf("апстрим = %q", cfg.Upstream.Host)
+	}
+	if cfg.UpstreamKey != "next-secret" {
+		t.Errorf("пропуск на следующее звено = %q, пробелы должны срезаться", cfg.UpstreamKey)
 	}
 }

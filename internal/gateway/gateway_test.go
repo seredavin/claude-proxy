@@ -64,6 +64,13 @@ type upstreamEcho struct {
 
 func newTestGateway(t *testing.T, mode config.Mode, tokens string, handler http.HandlerFunc) (*httptest.Server, *upstreamEcho, *syncBuffer) {
 	t.Helper()
+	return newChainedGateway(t, mode, tokens, "", handler)
+}
+
+// newChainedGateway поднимает шлюз, у которого наверху не Anthropic, а ещё
+// одно звено: в запросы к апстриму подставляется upstreamKey.
+func newChainedGateway(t *testing.T, mode config.Mode, tokens, upstreamKey string, handler http.HandlerFunc) (*httptest.Server, *upstreamEcho, *syncBuffer) {
+	t.Helper()
 
 	echo := &upstreamEcho{}
 	if handler == nil {
@@ -100,6 +107,7 @@ func newTestGateway(t *testing.T, mode config.Mode, tokens string, handler http.
 		Tokens:       set,
 		APIKey:       apiKey,
 		Upstream:     target,
+		UpstreamKey:  upstreamKey,
 		MaxBodyBytes: 1 << 20,
 		Logger:       slog.New(slog.NewTextHandler(logs, nil)),
 	})
@@ -434,5 +442,186 @@ func TestBearerToken(t *testing.T) {
 		if got := bearerToken(in); got != want {
 			t.Errorf("bearerToken(%q) = %q, ожидалось %q", in, got, want)
 		}
+	}
+}
+
+func TestOAuthInjectsUpstreamKey(t *testing.T) {
+	srv, echo, _ := newChainedGateway(t, config.ModeOAuth, "default:secret", "next-secret", nil)
+	header := http.Header{"X-Gateway-Key": {"secret"}, "Authorization": {"Bearer sk-ant-oat01-x"}}
+	do(t, srv, http.MethodPost, "/v1/messages", header, "{}")
+
+	if got := echo.gotHeader.Get("X-Gateway-Key"); got != "next-secret" {
+		t.Errorf("наверх ушёл X-Gateway-Key = %q, ожидался пропуск следующего звена", got)
+	}
+	if got := echo.gotHeader.Get("Authorization"); got != "Bearer sk-ant-oat01-x" {
+		t.Errorf("токен подписки должен идти сквозь цепочку как есть, получено %q", got)
+	}
+}
+
+func TestAPIKeyInjectsUpstreamKey(t *testing.T) {
+	srv, echo, _ := newChainedGateway(t, config.ModeAPIKey, "default:secret", "next-secret", nil)
+	do(t, srv, http.MethodPost, "/v1/messages",
+		http.Header{"Authorization": {"Bearer secret"}}, "{}")
+
+	if got := echo.gotHeader.Get("X-Gateway-Key"); got != "next-secret" {
+		t.Errorf("наверх ушёл X-Gateway-Key = %q", got)
+	}
+	if got := echo.gotHeader.Get("X-Api-Key"); got != "sk-ant-api03-secret" {
+		t.Errorf("x-api-key наверх = %q", got)
+	}
+	if got := echo.gotHeader.Get("Authorization"); got != "" {
+		t.Errorf("пропуск на шлюз утёк наверх в Authorization: %q", got)
+	}
+}
+
+func TestAPIKeyDropsClientGatewayKey(t *testing.T) {
+	srv, echo, _ := newTestGateway(t, config.ModeAPIKey, "default:secret", nil)
+	header := http.Header{"Authorization": {"Bearer secret"}, "X-Gateway-Key": {"smuggled"}}
+	do(t, srv, http.MethodPost, "/v1/messages", header, "{}")
+
+	// В режиме apikey заголовок не проверяется, поэтому клиент мог бы
+	// протащить им что угодно на следующее звено.
+	if got := echo.gotHeader.Get("X-Gateway-Key"); got != "" {
+		t.Errorf("X-Gateway-Key клиента утёк наверх: %q", got)
+	}
+}
+
+func TestOAuthAcceptsAPIKeyAsCredential(t *testing.T) {
+	srv, echo, _ := newTestGateway(t, config.ModeOAuth, "default:secret", nil)
+	// Так выглядит запрос от звена в режиме apikey: Authorization снят,
+	// credential лежит в X-Api-Key.
+	header := http.Header{"X-Gateway-Key": {"secret"}, "X-Api-Key": {"sk-ant-api03-zzz"}}
+	resp := do(t, srv, http.MethodPost, "/v1/messages", header, "{}")
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус %d, ожидалось 200: credential в X-Api-Key тоже credential", resp.StatusCode)
+	}
+	if got := echo.gotHeader.Get("X-Api-Key"); got != "sk-ant-api03-zzz" {
+		t.Errorf("x-api-key наверх = %q", got)
+	}
+}
+
+// startHop поднимает одно звено цепочки за TLS и возвращает его URL и клиента,
+// который этому сертификату доверяет.
+func startHop(t *testing.T, opts Options) (string, *http.Client) {
+	t.Helper()
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if opts.MaxBodyBytes == 0 {
+		opts.MaxBodyBytes = 1 << 20
+	}
+	srv := httptest.NewTLSServer(New(opts))
+	t.Cleanup(srv.Close)
+	return srv.URL, srv.Client()
+}
+
+// startStub изображает Anthropic: запоминает заголовки последнего запроса.
+func startStub(t *testing.T) (*url.URL, *upstreamEcho) {
+	t.Helper()
+	echo := &upstreamEcho{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		echo.gotHeader = r.Header.Clone()
+		echo.gotHost = r.Host
+		_, _ = io.WriteString(w, "upstream ok")
+	}))
+	t.Cleanup(srv.Close)
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target, echo
+}
+
+func tokensOf(t *testing.T, spec string) auth.Set {
+	t.Helper()
+	set, err := auth.Parse(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return set
+}
+
+func TestChainOAuthToOAuth(t *testing.T) {
+	stubURL, stub := startStub(t)
+
+	// Звено B — у интернета: проверяет свой пропуск и отдаёт запрос Anthropic.
+	bURL, bClient := startHop(t, Options{
+		Mode:     config.ModeOAuth,
+		Tokens:   tokensOf(t, "edge:BBB"),
+		Upstream: stubURL,
+	})
+	b, err := url.Parse(bURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Звено A — внутреннее: апстрим B, наверх подставляет пропуск B.
+	// Transport берётся у тестового клиента: так на Linux работает доверие
+	// через SSL_CERT_FILE, а в тесте — напрямую.
+	aGw := New(Options{
+		Mode:         config.ModeOAuth,
+		Tokens:       tokensOf(t, "client:AAA"),
+		Upstream:     b,
+		UpstreamKey:  "BBB",
+		MaxBodyBytes: 1 << 20,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Transport:    bClient.Transport,
+	})
+	a := httptest.NewServer(aGw)
+	defer a.Close()
+
+	header := http.Header{"X-Gateway-Key": {"AAA"}, "Authorization": {"Bearer sk-ant-oat01-x"}}
+	resp := do(t, a, http.MethodPost, "/v1/messages", header, "{}")
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус %d: цепочка не прошла, тело %q", resp.StatusCode, bodyOf(t, resp))
+	}
+	if got := stub.gotHeader.Get("Authorization"); got != "Bearer sk-ant-oat01-x" {
+		t.Errorf("до Anthropic дошёл Authorization = %q", got)
+	}
+	if got := stub.gotHeader.Get("X-Gateway-Key"); got != "" {
+		t.Errorf("пропуск звена B утёк до Anthropic: %q", got)
+	}
+}
+
+func TestChainAPIKeyToOAuth(t *testing.T) {
+	stubURL, stub := startStub(t)
+
+	bURL, bClient := startHop(t, Options{
+		Mode:     config.ModeOAuth,
+		Tokens:   tokensOf(t, "edge:BBB"),
+		Upstream: stubURL,
+	})
+	b, err := url.Parse(bURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ключ Console лежит на внутреннем звене, наружное его только передаёт.
+	aGw := New(Options{
+		Mode:         config.ModeAPIKey,
+		Tokens:       tokensOf(t, "client:AAA"),
+		APIKey:       "sk-ant-api03-secret",
+		Upstream:     b,
+		UpstreamKey:  "BBB",
+		MaxBodyBytes: 1 << 20,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Transport:    bClient.Transport,
+	})
+	a := httptest.NewServer(aGw)
+	defer a.Close()
+
+	resp := do(t, a, http.MethodPost, "/v1/messages",
+		http.Header{"Authorization": {"Bearer AAA"}}, "{}")
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус %d: тело %q", resp.StatusCode, bodyOf(t, resp))
+	}
+	if got := stub.gotHeader.Get("X-Api-Key"); got != "sk-ant-api03-secret" {
+		t.Errorf("до Anthropic дошёл x-api-key = %q", got)
+	}
+	if got := stub.gotHeader.Get("Authorization"); got != "" {
+		t.Errorf("пропуск на шлюз утёк до Anthropic: %q", got)
 	}
 }

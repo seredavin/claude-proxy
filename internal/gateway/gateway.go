@@ -35,10 +35,13 @@ const (
 
 // Options — всё, что нужно шлюзу для работы.
 type Options struct {
-	Mode         config.Mode
-	Tokens       auth.Set
-	APIKey       string
-	Upstream     *url.URL
+	Mode     config.Mode
+	Tokens   auth.Set
+	APIKey   string
+	Upstream *url.URL
+	// UpstreamKey — пропуск на следующий шлюз цепочки. Пусто — апстрим
+	// Anthropic, подставлять нечего.
+	UpstreamKey  string
 	MaxBodyBytes int64
 	Logger       *slog.Logger
 
@@ -86,6 +89,15 @@ func New(opts Options) *Gateway {
 			// X-Forwarded-* отбрасываем и своих не добавляем.
 			for _, h := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
 				pr.Out.Header.Del(h)
+			}
+
+			// Пропуск на этот шлюз наверх не уходит ни в одном режиме: в oauth
+			// он уже проверен, в apikey — не проверялся и наверху не нужен.
+			// Если апстрим — следующее звено цепочки, вместо него подставляется
+			// его собственный пропуск.
+			pr.Out.Header.Del("X-Gateway-Key")
+			if opts.UpstreamKey != "" {
+				pr.Out.Header.Set("X-Gateway-Key", opts.UpstreamKey)
 			}
 		},
 		// -1 — писать клиенту сразу, не накапливая буфер. Без этого ломается
@@ -189,12 +201,14 @@ func (g *Gateway) authorize(w http.ResponseWriter, r *http.Request) (label strin
 			writeError(w, http.StatusUnauthorized, "authentication_error", "invalid gateway key")
 			return "", false
 		}
-		if r.Header.Get("Authorization") == "" {
+		// Credential Anthropic обязателен: без него ответил бы уже Anthropic,
+		// а его 401 клиент трактует как недоступность шлюза. X-Api-Key тоже
+		// считается credential'ом — его подставляет предыдущее звено цепочки,
+		// работающее в режиме apikey.
+		if r.Header.Get("Authorization") == "" && r.Header.Get("X-Api-Key") == "" {
 			writeError(w, http.StatusUnauthorized, "authentication_error", "missing oauth token")
 			return label, false
 		}
-		// Наверх пропуск на шлюз не уходит.
-		r.Header.Del("X-Gateway-Key")
 		return label, true
 	}
 }

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,6 +24,57 @@ func TestEnvLinesПропускаетПустые(t *testing.T) {
 	}
 	if strings.Contains(lines, "CLAUDE_PROXY_CERT_FILE") {
 		t.Errorf("пустой путь к сертификату не должен попадать в файл:\n%s", lines)
+	}
+	if strings.Contains(lines, "CLAUDE_PROXY_UPSTREAM_KEY") {
+		t.Errorf("пустой пропуск на следующее звено не должен попадать в файл:\n%s", lines)
+	}
+}
+
+func TestEnvLinesWritesUpstreamKey(t *testing.T) {
+	raw := config.Defaults()
+	raw.Tokens = "default:abc"
+	raw.Upstream = "https://edge.example.com:9443"
+	raw.UpstreamKey = "next-secret"
+
+	lines := strings.Join(envLines(raw), "\n")
+
+	if !strings.Contains(lines, `CLAUDE_PROXY_UPSTREAM_KEY="next-secret"`) {
+		t.Errorf("пропуск на следующее звено не попал в файл:\n%s", lines)
+	}
+}
+
+func TestForeignEnvLinesSurviveReinstall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claude-proxy.env")
+	content := strings.Join([]string{
+		"# Создано claude-proxy install 2026-01-01",
+		`CLAUDE_PROXY_TOKENS="default:abc"`,
+		`GATEWAY_TOKEN="legacy-alias"`,
+		"SSL_CERT_FILE=/usr/local/share/ca-certificates/internal-ca.crt",
+		`HTTPS_PROXY="http://corp-proxy:3128"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := foreignEnvLines(path)
+	want := []string{
+		"SSL_CERT_FILE=/usr/local/share/ca-certificates/internal-ca.crt",
+		`HTTPS_PROXY="http://corp-proxy:3128"`,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("перенесено %v, ожидалось %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("строка %d = %q, ожидалось %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestForeignEnvLinesMissingFile(t *testing.T) {
+	if got := foreignEnvLines(filepath.Join(t.TempDir(), "missing.env")); got != nil {
+		t.Errorf("ожидался пустой результат, получено %v", got)
 	}
 }
 

@@ -232,11 +232,20 @@ func writeEnvFile(raw config.Raw, out io.Writer) error {
 		return fmt.Errorf("каталог %s: %w", config.DefaultConfigDir, err)
 	}
 
+	// Читаем прежний файл до записи: своё оператор мог дописать руками.
+	foreign := foreignEnvLines(config.DefaultConfigFile)
+
 	var b strings.Builder
 	b.WriteString("# Создано claude-proxy install " + time.Now().Format("2006-01-02") + "\n")
 	b.WriteString("# Значения отсюда перебивают флаги в ExecStart.\n\n")
 	for _, kv := range envLines(raw) {
 		b.WriteString(kv + "\n")
+	}
+	if len(foreign) > 0 {
+		b.WriteString("\n# Добавлено оператором — install переносит эти строки как есть.\n")
+		for _, line := range foreign {
+			b.WriteString(line + "\n")
+		}
 	}
 
 	// 0600: внутри токены шлюза и, в режиме apikey, ключ Console.
@@ -249,7 +258,41 @@ func writeEnvFile(raw config.Raw, out io.Writer) error {
 		return fmt.Errorf("права на %s: %w", config.DefaultConfigFile, err)
 	}
 	fmt.Fprintf(out, "  ok конфигурация %s (режим 600)\n", config.DefaultConfigFile)
+	if len(foreign) > 0 {
+		fmt.Fprintf(out, "  ok перенесено переменных оператора: %d\n", len(foreign))
+	}
 	return nil
+}
+
+// foreignEnvLines достаёт из прежнего EnvironmentFile строки, которых
+// claude-proxy там не писал: их поставил оператор. Типичные примеры —
+// SSL_CERT_FILE (доверие следующему звену цепочки) и HTTPS_PROXY (исход
+// наружу через корпоративный прокси). Файл перезаписывается целиком,
+// поэтому без такого переноса переустановка молча гасила бы эти настройки.
+func foreignEnvLines(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	managed := map[string]bool{}
+	for _, key := range config.ManagedEnvKeys() {
+		managed[key] = true
+	}
+
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, _, found := strings.Cut(line, "=")
+		if !found || managed[strings.TrimSpace(key)] {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // envLines превращает Raw в строки EnvironmentFile, пропуская пустые значения.
@@ -261,6 +304,7 @@ func envLines(raw config.Raw) []string {
 		{"CLAUDE_PROXY_TOKENS", raw.Tokens},
 		{"CLAUDE_PROXY_ANTHROPIC_API_KEY", raw.APIKey},
 		{"CLAUDE_PROXY_UPSTREAM", raw.Upstream},
+		{"CLAUDE_PROXY_UPSTREAM_KEY", raw.UpstreamKey},
 		{"CLAUDE_PROXY_TLS", raw.TLS},
 		{"CLAUDE_PROXY_CERT_FILE", raw.CertFile},
 		{"CLAUDE_PROXY_KEY_FILE", raw.KeyFile},
