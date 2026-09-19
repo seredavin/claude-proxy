@@ -27,5 +27,8 @@ jobs:
       - name: Гонки
         run: go test -race ./...
 
+      - name: Сквозная проверка цепочки шлюзов
+        run: make smoke
+
       - name: Сборка под все платформы релиза
         run: make dist

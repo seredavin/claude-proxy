@@ -11,7 +11,7 @@ DIST    := dist
 # Платформы релиза. Хост прокси почти всегда linux, darwin — для локальных проверок.
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: all build test vet fmt check dist clean docker install
+.PHONY: all build test vet fmt check smoke dist clean docker install
 
 all: check build
 
@@ -30,6 +30,12 @@ fmt:
 # Форматирование проверяется, а не исправляется: в CI правки недопустимы.
 check: vet test
 	@test -z "$$(gofmt -l .)" || { echo "не отформатировано:"; gofmt -l .; exit 1; }
+
+# Сквозная проверка цепочки шлюзов на собранном бинаре. Только Linux:
+# доверие между звеньями настраивается через SSL_CERT_FILE, который Go
+# читает только там; на macOS скрипт сам сообщает SKIP.
+smoke: build
+	scripts/chain-smoke.sh
 
 dist:
 	@rm -rf $(DIST)

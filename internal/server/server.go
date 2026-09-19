@@ -39,6 +39,7 @@ func Run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		Tokens:       cfg.Tokens,
 		APIKey:       cfg.APIKey,
 		Upstream:     cfg.Upstream,
+		UpstreamKey:  cfg.UpstreamKey,
 		MaxBodyBytes: cfg.MaxBodyBytes,
 		Logger:       log,
 	})
