@@ -1,0 +1,80 @@
+schema: spec-driven
+githubCopilot:
+  cloudAgent: false
+
+context: |
+  Проект: claude-proxy — reverse proxy, дающий Claude Code доступ к
+  api.anthropic.com из сети без прямого интернета.
+
+  Стек: Go 1.25, без внешних зависимостей кроме golang.org/x/crypto.
+  Один статический бинарь (CGO_ENABLED=0): шлюз + ACME-клиент +
+  установщик systemd-сервиса. Ни Docker, ни nginx, ни certbot.
+
+  Структура: main.go — точка входа и CLI; internal/gateway — проксирование,
+  internal/server — HTTP/TLS-сервер, internal/tlsconf — сертификаты и ACME,
+  internal/auth — токены шлюза, internal/config — конфигурация,
+  internal/service — установка systemd-юнита, internal/clientenv — генерация
+  переменных окружения для клиента. Документация: README.md (быстрый старт),
+  docs/advanced.md (подробности).
+
+  Конвенции:
+  - Комментарии в коде и документация — на русском, идентификаторы — на английском.
+  - Сообщения коммитов — на русском, без упоминания AI-ассистентов.
+  - Проверка перед коммитом: make check (gofmt -l, go vet, go test ./...).
+  - gofmt в CI проверяется, а не исправляется.
+  - Токен подписки Anthropic живёт на клиентах, не на шлюзе — не переносить
+    его хранение на сервер.
+
+  Процесс разработки — GitHub flow (транк-ориентированный):
+  - main всегда рабочая и релизопригодная; прямые коммиты в main не делаются.
+  - Любая работа идёт в короткоживущей ветке от актуального main:
+    feature/<кратко>, fix/<кратко>, docs/<кратко>.
+  - Ветка вливается в main только через pull request с зелёным CI
+    (workflow ci: make check на push в main и на каждый PR).
+  - После мержа ветка удаляется; долгоживущих develop/release-веток нет.
+  - Релиз — тег vX.Y.Z на коммите main; тег запускает workflow release
+    (сборка бинарей под linux/darwin, amd64/arm64).
+  - Одно изменение OpenSpec = одна ветка = один PR.
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+operations:
+  apply:
+    guidance:
+      - Перед первой задачей создать ветку от актуального main по схеме
+        feature/<имя-изменения> (или fix/, docs/). В main не коммитить.
+      - Перед коммитом прогнать make check (gofmt -l, go vet, go test ./...).
+      - Коммиты на русском, без упоминания AI-ассистентов.
+  archive:
+    guidance:
+      - Архивировать только после мержа PR в main и зелёного CI.
+      - После мержа удалить ветку изменения.
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
