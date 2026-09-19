@@ -67,6 +67,18 @@ wait_ready() {
     fail "$name не поднялся на порту $port"
 }
 
+# Ждёт, пока заглушка начнёт принимать соединения. На чистом раннере python
+# поднимается медленнее, чем звенья успевают отправить первый запрос.
+wait_stub() {
+    for _ in $(seq 50); do
+        if curl -sk -o /dev/null --max-time 1 -X POST -d '{}' "https://127.0.0.1:$STUB_PORT/"; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    fail "заглушка не поднялась на порту $STUB_PORT"
+}
+
 # Ждёт, пока процесс действительно завершится: пока он жив, порт занят.
 wait_gone() {
     local pid=$1 name=$2
@@ -151,6 +163,7 @@ srv.serve_forever()
 PY
 STUB_PID=$!
 hush
+wait_stub
 
 echo "==> Звено B (oauth) на :$EDGE_PORT"
 "$BIN" run --tls files \
