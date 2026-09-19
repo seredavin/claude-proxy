@@ -12,3 +12,6 @@ certs/
 # Артефакты сборки
 /claude-proxy
 /dist/
+
+# Локальные разрешения Claude Code — у каждого свои
+.claude/settings.local.json
