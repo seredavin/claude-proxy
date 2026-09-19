@@ -2,6 +2,7 @@
 package service
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -99,7 +100,19 @@ func Install(opts InstallOptions) error {
 	}
 	fmt.Fprintf(out, "  ok сервис %s запущен\n", config.ServiceName)
 
-	if err := waitHealthy(opts.Resolved.Listen, 30*time.Second); err != nil {
+	timeout := 30 * time.Second
+	if opts.Resolved.TLS == config.TLSAuto {
+		// Первое рукопожатие тянет за собой заказ в Let's Encrypt и проверку
+		// HTTP-01 — это заметно дольше обычного старта.
+		timeout = 3 * time.Minute
+		fmt.Fprintf(out, "  .. жду выпуск сертификата для %s, это может занять минуту\n",
+			opts.Resolved.Domain)
+	}
+
+	if err := waitHealthy(opts.Resolved.Listen, opts.Resolved.Domain, timeout); err != nil {
+		if opts.Resolved.TLS == config.TLSAuto {
+			return fmt.Errorf("%w\n    частые причины: порт 80 закрыт снаружи, A-запись ведёт не на этот хост, исчерпан лимит Let's Encrypt\n    логи: journalctl -u %s -n 50", err, config.ServiceName)
+		}
 		return fmt.Errorf("%w (логи: journalctl -u %s -n 50)", err, config.ServiceName)
 	}
 	fmt.Fprintf(out, "  ok шлюз отвечает на /healthz\n")
@@ -380,21 +393,40 @@ func checkCertReadable(cfg *config.Config, runAs string, out io.Writer) {
 	}
 }
 
-func waitHealthy(listen string, timeout time.Duration) error {
+// waitHealthy дожидается ответа шлюза на /healthz.
+//
+// Соединение идёт на 127.0.0.1, но имя в SNI подставляется настоящее.
+// Это обязательно: в режиме auto сертификат выбирает autocert, а без имени
+// сервера он не знает, какой выдавать, и рвёт рукопожатие с «missing server
+// name». Заодно первый такой запрос и запускает выпуск сертификата, поэтому
+// установка честно падает здесь, если Let's Encrypt не может достучаться
+// до порта 80.
+func waitHealthy(listen, serverName string, timeout time.Duration) error {
 	_, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return fmt.Errorf("не разобрать адрес %q: %w", listen, err)
 	}
+	if serverName == "" {
+		serverName = "localhost"
+	}
 
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	client := &http.Client{
-		Timeout: 3 * time.Second,
+		Timeout: 30 * time.Second, // выпуск сертификата идёт внутри рукопожатия
 		Transport: &http.Transport{
-			// Проверяем локально: имя не совпадёт, доверие тут ни при чём.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			// Стучимся на петлю независимо от того, куда указывает имя:
+			// внутренний DNS может не знать его или вести на внешний адрес.
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+			},
+			// Имя проверяем отдельно, после установки. Здесь важно только то,
+			// что шлюз поднялся и смог предъявить сертификат.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, ServerName: serverName}, //nolint:gosec
 		},
 	}
-	url := "https://127.0.0.1:" + port + "/healthz"
+	url := "https://" + net.JoinHostPort(serverName, port) + "/healthz"
 
+	var lastErr error
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(url)
@@ -404,10 +436,13 @@ func waitHealthy(listen string, timeout time.Duration) error {
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
+			lastErr = fmt.Errorf("ответ %s", resp.Status)
+		} else {
+			lastErr = err
 		}
 		time.Sleep(time.Second)
 	}
-	return fmt.Errorf("шлюз не ответил на %s за %s", url, timeout)
+	return fmt.Errorf("шлюз не ответил на %s за %s: %w", url, timeout, lastErr)
 }
 
 func run(name string, args ...string) error {
