@@ -8,3 +8,7 @@
 *.key
 *.crt
 certs/
+
+# Артефакты сборки
+/claude-proxy
+/dist/
