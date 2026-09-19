@@ -36,11 +36,11 @@
 | Флаг | Переменная | По умолчанию | Назначение |
 |---|---|---|---|
 | `--mode` | `CLAUDE_PROXY_MODE` | `oauth` | `oauth` или `apikey` |
-| `--listen` | `CLAUDE_PROXY_LISTEN` | `:9443` | Адрес TLS-слушателя |
-| `--domain` | `CLAUDE_PROXY_DOMAIN` | — | Имя шлюза; обязательно для `auto` и `self` |
+| `--listen` | `CLAUDE_PROXY_LISTEN` | `:9443` | Адрес слушателя; для `none` — только loopback |
+| `--domain` | `CLAUDE_PROXY_DOMAIN` | — | Имя шлюза; обязательно для `auto` и `self`, при `none` не используется |
 | `--tokens` | `CLAUDE_PROXY_TOKENS` | — | Токены шлюза, см. ниже |
 | `--api-key` | `CLAUDE_PROXY_ANTHROPIC_API_KEY` | — | Ключ Console, только для `apikey` |
-| `--tls` | `CLAUDE_PROXY_TLS` | `auto` | `auto`, `files` или `self` |
+| `--tls` | `CLAUDE_PROXY_TLS` | `auto` | `auto`, `files`, `self` или `none` |
 | `--cert-file` | `CLAUDE_PROXY_CERT_FILE` | — | PEM с цепочкой, для `files` |
 | `--key-file` | `CLAUDE_PROXY_KEY_FILE` | — | PEM с ключом, для `files` |
 | `--acme-email` | `CLAUDE_PROXY_ACME_EMAIL` | — | Контакт для Let's Encrypt |
@@ -195,10 +195,37 @@ claude-proxy gen-cert --domain claude-proxy.internal --out-dir /opt/proxy-certs
 Для постоянной эксплуатации не годится: отозвать такой сертификат нечем,
 а доверие раздаётся вручную.
 
+### `none` — без TLS, только loopback
+
+Шлюз на одной машине с Claude Code — типично локальное звено
+[цепочки](#цепочка-шлюзов) на ноутбуке. Соединение не покидает петлю, и
+сертификат там ничего не защищает, только требует `--domain`, каталог под
+пару и `NODE_EXTRA_CA_CERTS` на клиенте. `none` убирает всё это: слушатель
+принимает обычный HTTP.
+
+```bash
+claude-proxy run --tls none --listen 127.0.0.1:9443 --tokens "local:<токен>"
+```
+
+Не нужны `--domain`, `--state-dir`, `--cert-file`, `--key-file`; слушатель
+проверки ACME не поднимается. Заданный `--domain` игнорируется.
+
+Режим разрешён **только на loopback**: `127.0.0.1`, `::1` или `localhost`.
+С `:9443` (все интерфейсы), `0.0.0.0` или адресом сетевого интерфейса шлюз
+не стартует — без TLS пропуски и токены подписки шли бы по сети открытым
+текстом, и здесь отказ, а не предупреждение. Для контейнерной сети и любого
+другого случая, когда клиент на другой машине, — `self` плюс
+`NODE_EXTRA_CA_CERTS`.
+
+Апстрим остаётся `https://`: `none` касается только входящей стороны, наружу
+открытым текстом шлюз не ходит. `client-env` печатает
+`ANTHROPIC_BASE_URL=http://127.0.0.1:9443` — адрес слушателя, без доверия к
+сертификату.
+
 ### Доверие к сертификату на клиентах
 
 Нужно для внутреннего CA и самоподписанного; для Let's Encrypt всё работает
-из коробки.
+из коробки, для `none` не нужно вовсе.
 
 Claude Code работает на Node.js, а Node **не использует** системное хранилище
 сертификатов. Добавления CA в систему (`update-ca-certificates`, Keychain)
@@ -264,6 +291,38 @@ CLAUDE_PROXY_UPSTREAM_KEY="<токен звена B>"
 
 Клиенты при этом настраиваются на A и про существование B не знают —
 `claude-proxy client-env` на звене A печатает готовый блок.
+
+### Локальное звено на ноутбуке
+
+Частный случай: звено A живёт на той же машине, что и Claude Code. Тогда
+ему не нужен сертификат — [`--tls none`](#none--без-tls-только-loopback):
+
+```bash
+LOCAL_TOKEN=$(claude-proxy gen-token | sed 's/^default://')
+
+claude-proxy run --tls none --listen 127.0.0.1:9443 \
+  --tokens "local:$LOCAL_TOKEN" \
+  --upstream https://edge.example.com:9443 \
+  --upstream-key "<токен звена B>"
+```
+
+Клиент — как обычно, только адрес по `http` и без `NODE_EXTRA_CA_CERTS`:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:9443
+export ANTHROPIC_CUSTOM_HEADERS="X-Gateway-Key: $LOCAL_TOKEN"
+export ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1
+export CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS=1
+unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY
+claude
+```
+
+Без TLS только вход: к звену B локальное звено идёт по `https` и проверяет
+его сертификат как обычный TLS-клиент — см. следующий раздел. На macOS это
+означает, что самоподписанный сертификат звена B придётся добавить в
+связку ключей: `SSL_CERT_FILE` там не работает.
 
 Шлюз не стартует, если `--upstream-key` задан при дефолтном апстриме:
 Anthropic про этот заголовок не знает и молча его проигнорирует, а значит
@@ -536,6 +595,10 @@ sudo claude-proxy uninstall --purge  # снести всё, включая то�
 - Сравнение токенов идёт за постоянное время и перебирает весь список до
   конца — время ответа не зависит ни от позиции токена, ни от длины
   совпавшего префикса.
+- `--tls none` отсекается в валидации конфигурации, а не при открытии
+  сокета: проверка loopback стоит рядом с остальными отказами (пустые токены,
+  `--upstream-key` при дефолтном апстриме) и срабатывает в `install` до
+  записи юнита. `localhost` принимается по имени без резолва.
 - `/` отвечает `200` без проверки ключа — это префлайт-зонд Claude Code при
   старте (идёт без `X-Gateway-Key`). Иначе CLI получает `401` и падает с
   «Unable to connect» до первого реального запроса.

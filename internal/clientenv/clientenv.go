@@ -42,14 +42,20 @@ func Render(cfg *config.Config, token string) string {
 // baseURL собирает адрес шлюза. Порт указывается всегда: без него Node
 // пойдёт на 443 и не достучится.
 func baseURL(cfg *config.Config) string {
+	listenHost, port, err := net.SplitHostPort(cfg.Listen)
+	if err != nil || port == "" {
+		port = "9443"
+	}
+
+	// Без TLS шлюз слушает только loopback, и клиент на той же машине —
+	// хост берём прямо из адреса слушателя, имя шлюза здесь ни при чём.
+	if cfg.TLS == config.TLSNone {
+		return "http://" + net.JoinHostPort(listenHost, port)
+	}
+
 	host := cfg.Domain
 	if host == "" {
 		host = "<имя-шлюза>"
-	}
-
-	_, port, err := net.SplitHostPort(cfg.Listen)
-	if err != nil || port == "" {
-		port = "9443"
 	}
 	return "https://" + net.JoinHostPort(host, port)
 }

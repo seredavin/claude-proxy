@@ -43,6 +43,9 @@ const (
 	TLSFiles TLSSource = "files"
 	// TLSSelf — самоподписанный сертификат из каталога состояния.
 	TLSSelf TLSSource = "self"
+	// TLSNone — слушатель без TLS. Допустим только на loopback: шлюз живёт
+	// на одной машине с клиентами, и сертификат там ничего не защищает.
+	TLSNone TLSSource = "none"
 )
 
 // Пути по умолчанию. Совпадают с тем, что прописывает подкоманда install.
@@ -167,14 +170,14 @@ func Bind(fs *flag.FlagSet) *Raw {
 	d := r
 
 	fs.StringVar(&r.Mode, "mode", d.Mode, "режим шлюза: oauth | apikey")
-	fs.StringVar(&r.Listen, "listen", d.Listen, "адрес прослушивания TLS, host:port")
-	fs.StringVar(&r.Domain, "domain", d.Domain, "имя, по которому клиенты обращаются к шлюзу (обязательно для --tls auto)")
+	fs.StringVar(&r.Listen, "listen", d.Listen, "адрес прослушивания, host:port (для --tls none — только loopback)")
+	fs.StringVar(&r.Domain, "domain", d.Domain, "имя, по которому клиенты обращаются к шлюзу (обязательно для --tls auto и self)")
 	fs.StringVar(&r.Tokens, "tokens", d.Tokens, "токены шлюза: \"метка:значение\" через запятую")
 	fs.StringVar(&r.APIKey, "api-key", d.APIKey, "ключ Anthropic Console, только для --mode apikey")
 	fs.StringVar(&r.Upstream, "upstream", d.Upstream, "базовый URL Anthropic API")
 	fs.StringVar(&r.UpstreamKey, "upstream-key", d.UpstreamKey,
 		"пропуск на следующий шлюз в цепочке; уходит наверх как X-Gateway-Key")
-	fs.StringVar(&r.TLS, "tls", d.TLS, "источник сертификата: auto | files | self")
+	fs.StringVar(&r.TLS, "tls", d.TLS, "источник сертификата: auto | files | self | none (без TLS, только loopback)")
 	fs.StringVar(&r.CertFile, "cert-file", d.CertFile, "PEM с цепочкой сертификатов, для --tls files")
 	fs.StringVar(&r.KeyFile, "key-file", d.KeyFile, "PEM с приватным ключом, для --tls files")
 	fs.StringVar(&r.ACMEEmail, "acme-email", d.ACMEEmail, "контакт для Let's Encrypt")
@@ -261,8 +264,10 @@ func Resolve(r Raw) (*Config, error) {
 		c.TLS = TLSFiles
 	case TLSSelf:
 		c.TLS = TLSSelf
+	case TLSNone:
+		c.TLS = TLSNone
 	default:
-		return nil, fmt.Errorf("недопустимый источник сертификата %q (ожидается auto, files или self)", r.TLS)
+		return nil, fmt.Errorf("недопустимый источник сертификата %q (ожидается auto, files, self или none)", r.TLS)
 	}
 
 	tokens, err := auth.Parse(r.Tokens)
@@ -349,6 +354,14 @@ func (c *Config) validate() error {
 		if c.StateDir == "" {
 			return fmt.Errorf("для --tls self нужен --state-dir: там лежит самоподписанная пара")
 		}
+	case TLSNone:
+		// Без TLS пропуски и токены подписки идут открытым текстом. На петле
+		// это никому не видно, в сети — видно всем, поэтому не предупреждение,
+		// а отказ. Пустой хост означает все интерфейсы и тоже не годится.
+		host, _, _ := net.SplitHostPort(c.Listen)
+		if !isLoopbackHost(host) {
+			return fmt.Errorf("--tls none допустим только на loopback-адресе (127.0.0.1, ::1, localhost), получено %q: без TLS пропуски и токены подписки ушли бы по сети открытым текстом", c.Listen)
+		}
 	}
 
 	switch c.LogFormat {
@@ -365,6 +378,17 @@ func (c *Config) validate() error {
 // оставляет их как есть, а обычное сравнение строк на них спотыкается.
 func isAnthropicHost(host string) bool {
 	return strings.EqualFold(strings.TrimSuffix(host, "."), UpstreamHost)
+}
+
+// isLoopbackHost отвечает, ведёт ли хост слушателя на петлю. Имя localhost
+// принимается как есть, без резолва: DNS в валидации — лишняя зависимость,
+// а подмена localhost через /etc/hosts на что-то другое — экзотика.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // parseSize разбирает размер с необязательным суффиксом k, m или g.

@@ -20,6 +20,7 @@ import (
 
 // Provider — готовая к употреблению конфигурация TLS.
 type Provider struct {
+	// TLSConfig nil означает слушатель без TLS (источник none).
 	TLSConfig *tls.Config
 
 	// HTTPHandler не nil только для ACME: на нём отвечает проверка HTTP-01.
@@ -40,6 +41,10 @@ func New(cfg *config.Config, log *slog.Logger) (*Provider, error) {
 		return newFiles(cfg.CertFile, cfg.KeyFile, cfg.Domain, log)
 	case config.TLSSelf:
 		return newSelfSigned(cfg, log)
+	case config.TLSNone:
+		// Допустимость loopback-адреса проверена в config: сюда доходит
+		// только конфигурация, где открытый текст не покидает машину.
+		return &Provider{Description: "без TLS (только loopback)"}, nil
 	default:
 		return nil, fmt.Errorf("неизвестный источник сертификата %q", cfg.TLS)
 	}
