@@ -19,6 +19,8 @@ type recorder struct {
 	status      int
 	written     int64
 	wroteHeader bool
+	// mask — счётчики маскирования; nil, когда оно выключено.
+	mask *maskState
 }
 
 func (r *recorder) WriteHeader(status int) {
@@ -58,6 +60,19 @@ func (g *Gateway) logAccess(rec *recorder, r *http.Request, start time.Time, tok
 	}
 	if tokenLabel != "" {
 		attrs = append(attrs, "token", tokenLabel)
+	}
+	// Только счётчики: ни значений, ни суррогатов.
+	if rec.mask != nil {
+		st := rec.mask.counters()
+		for _, category := range st.Categories() {
+			attrs = append(attrs, "mask_"+category, st.Masked[category])
+		}
+		if st.Unmasked > 0 {
+			attrs = append(attrs, "unmasked", st.Unmasked)
+		}
+		if st.Errors > 0 {
+			attrs = append(attrs, "unmask_errors", st.Errors)
+		}
 	}
 
 	level := slog.LevelInfo

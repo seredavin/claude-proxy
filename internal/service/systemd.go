@@ -74,6 +74,14 @@ func Install(opts InstallOptions) error {
 		}
 	}
 
+	// Файл правил маскирования сервис читает на старте; без доступа он
+	// не поднимется — проверяем до записи конфигурации.
+	if opts.Resolved.MaskRules != "" {
+		if err := checkRulesReadable(opts.Resolved.MaskRules, runAs); err != nil {
+			return err
+		}
+	}
+
 	if err := writeEnvFile(opts.Raw, out); err != nil {
 		return err
 	}
@@ -318,6 +326,9 @@ func envLines(raw config.Raw) []string {
 		{"CLAUDE_PROXY_STATE_DIR", raw.StateDir},
 		{"CLAUDE_PROXY_MAX_BODY", raw.MaxBody},
 		{"CLAUDE_PROXY_LOG_FORMAT", raw.LogFormat},
+		{"CLAUDE_PROXY_MASK_RULES", raw.MaskRules},
+		{"CLAUDE_PROXY_MASK_ON_ERROR", raw.MaskOnError},
+		{"CLAUDE_PROXY_MASK_DEBUG", raw.MaskDebug},
 	}
 
 	var lines []string
@@ -443,6 +454,25 @@ func checkCertReadable(cfg *config.Config, runAs string, out io.Writer) {
 		fmt.Fprintf(out, "  ! пользователь %s не может прочитать %s\n", runAs, path)
 		fmt.Fprintf(out, "    выдайте доступ (setfacl -m u:%s:r %s) или ставьте с --service-user root\n", runAs, path)
 	}
+}
+
+// checkRulesReadable отказывает, если сервисный пользователь не прочитает
+// файл правил маскирования. В отличие от сертификатов это не предупреждение:
+// без правил шлюз не стартует вовсе.
+func checkRulesReadable(path, runAs string) error {
+	uid, gid, err := lookupIDs(runAs)
+	if err != nil {
+		return nil
+	}
+	return rulesReadableBy(path, uid, gid, runAs)
+}
+
+func rulesReadableBy(path string, uid, gid int, runAs string) error {
+	if readableBy(path, uid, gid) {
+		return nil
+	}
+	return fmt.Errorf("пользователь %s не может прочитать файл правил %s\n    выдайте доступ (setfacl -m u:%s:r %s) или ставьте с --service-user root",
+		runAs, path, runAs, path)
 }
 
 // waitHealthy дожидается ответа шлюза на /healthz.

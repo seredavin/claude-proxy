@@ -6,19 +6,24 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/seredavin/claude-proxy/internal/auth"
 	"github.com/seredavin/claude-proxy/internal/config"
+	"github.com/seredavin/claude-proxy/internal/mask"
 )
 
 // Таймауты общения с Anthropic. Длинные генерации на дефолтных 60s рвутся.
@@ -45,6 +50,11 @@ type Options struct {
 	MaxBodyBytes int64
 	Logger       *slog.Logger
 
+	// Masker — реестр таблиц маскирования. nil — тела не читаются и не
+	// меняются. MaskOnError — что делать с телом, которое не разобралось.
+	Masker      *mask.Registry
+	MaskOnError config.MaskPolicy
+
 	// Transport подменяется в тестах. Пустое значение — транспорт по умолчанию.
 	Transport http.RoundTripper
 }
@@ -58,6 +68,9 @@ type Gateway struct {
 	maxBody  int64
 	log      *slog.Logger
 	proxy    *httputil.ReverseProxy
+
+	masker      *mask.Registry
+	maskOnError config.MaskPolicy
 }
 
 // New собирает шлюз.
@@ -71,12 +84,14 @@ func New(opts Options) *Gateway {
 	}
 
 	g := &Gateway{
-		mode:     opts.Mode,
-		tokens:   opts.Tokens,
-		apiKey:   opts.APIKey,
-		upstream: opts.Upstream,
-		maxBody:  opts.MaxBodyBytes,
-		log:      opts.Logger,
+		mode:        opts.Mode,
+		tokens:      opts.Tokens,
+		apiKey:      opts.APIKey,
+		upstream:    opts.Upstream,
+		maxBody:     opts.MaxBodyBytes,
+		log:         opts.Logger,
+		masker:      opts.Masker,
+		maskOnError: opts.MaskOnError,
 	}
 
 	g.proxy = &httputil.ReverseProxy{
@@ -99,7 +114,14 @@ func New(opts Options) *Gateway {
 			if opts.UpstreamKey != "" {
 				pr.Out.Header.Set("X-Gateway-Key", opts.UpstreamKey)
 			}
+
+			// Демаскировать сжатый ответ нельзя. Без заголовка клиента
+			// транспорт сам попросит gzip и прозрачно распакует.
+			if opts.Masker != nil {
+				pr.Out.Header.Del("Accept-Encoding")
+			}
 		},
+		ModifyResponse: g.unmaskResponse,
 		// -1 — писать клиенту сразу, не накапливая буфер. Без этого ломается
 		// SSE: ответ приходит одним куском в конце генерации.
 		FlushInterval: -1,
@@ -175,8 +197,121 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, g.maxBody)
 	}
 
+	if g.masker != nil {
+		state := &maskState{session: g.masker.Session(label)}
+		rec.mask = state
+		r = r.WithContext(context.WithValue(r.Context(), maskStateKey{}, state))
+		if !g.maskRequest(rec, r, state) {
+			g.logAccess(rec, r, start, label)
+			return
+		}
+	}
+
 	g.proxy.ServeHTTP(rec, r)
 	g.logAccess(rec, r, start, label)
+}
+
+// maskStateKey — ключ контекста, по которому ModifyResponse находит
+// таблицу и счётчики запроса.
+type maskStateKey struct{}
+
+// maskState — маскирование одного запроса: таблица метки, счётчики запроса
+// и поток ответа (его счётчики читаются после завершения проксирования).
+type maskState struct {
+	session *mask.Session
+	stats   mask.Stats
+	stream  *mask.Stream
+}
+
+// counters — итоговые счётчики запроса и ответа для access-лога.
+func (m *maskState) counters() mask.Stats {
+	st := m.stats
+	if m.stream != nil {
+		s := m.stream.Stats()
+		st.Unmasked += s.Unmasked
+		st.Errors += s.Errors
+	}
+	return st
+}
+
+// maskRequest читает тело целиком и подменяет его замаскированным.
+// Возвращает false, если запрос завершён ошибкой и на апстрим не идёт.
+func (g *Gateway) maskRequest(w http.ResponseWriter, r *http.Request, state *maskState) bool {
+	if r.Body == nil || r.Body == http.NoBody {
+		return true
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		// MaxBytesReader уже ответил 413 сам; прочие ошибки чтения —
+		// клиент оборвал передачу.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("request body exceeds gateway limit of %d bytes", g.maxBody))
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "gateway could not read request body")
+		}
+		return false
+	}
+	if len(body) == 0 {
+		r.Body = http.NoBody
+		return true
+	}
+
+	masked, stats, err := state.session.MaskRequest(body)
+	if err != nil {
+		if g.maskOnError == config.MaskOpen {
+			g.log.Warn("тело не замаскировано, отправлено как есть", "token", state.session.Label(), "err", err)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+			return true
+		}
+		g.log.Warn("тело не замаскировано, запрос отклонён", "token", state.session.Label(), "err", err)
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"gateway could not mask request: "+err.Error())
+		return false
+	}
+	state.stats = stats
+	r.Body = io.NopCloser(bytes.NewReader(masked))
+	r.ContentLength = int64(len(masked))
+	r.Header.Set("Content-Length", strconv.Itoa(len(masked)))
+	return true
+}
+
+// unmaskResponse возвращает исходные значения в ответ апстрима. Сбой
+// разбора никогда не блокирует ответ: в эту сторону утечки быть не может.
+func (g *Gateway) unmaskResponse(resp *http.Response) error {
+	state, _ := resp.Request.Context().Value(maskStateKey{}).(*maskState)
+	if state == nil {
+		return nil
+	}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	switch mediaType {
+	case "text/event-stream":
+		state.stream = state.session.UnmaskStream(resp.Body)
+		resp.Body = state.stream
+		// Длина потока после подстановки другая; SSE и так идёт chunked.
+		resp.ContentLength = -1
+		resp.Header.Del("Content-Length")
+	case "application/json":
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		out, n, uerr := state.session.UnmaskJSON(body)
+		if uerr != nil {
+			g.log.Warn("ответ не разобрался, передан как есть", "token", state.session.Label(), "err", uerr)
+			state.stats.Errors++
+			out = body
+		} else {
+			state.stats.Unmasked += n
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(out))
+		resp.ContentLength = int64(len(out))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	}
+	return nil
 }
 
 // authorize проверяет пропуск на шлюз и готовит заголовки для апстрима.

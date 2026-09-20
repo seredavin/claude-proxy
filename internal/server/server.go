@@ -12,6 +12,7 @@ import (
 
 	"github.com/seredavin/claude-proxy/internal/config"
 	"github.com/seredavin/claude-proxy/internal/gateway"
+	"github.com/seredavin/claude-proxy/internal/mask"
 	"github.com/seredavin/claude-proxy/internal/tlsconf"
 )
 
@@ -42,6 +43,19 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 		return err
 	}
 
+	// Маскирование включается наличием файла правил. Реестр таблиц —
+	// один на процесс, и создаётся здесь, а не в конфиге: у него есть
+	// состояние и логгер.
+	var masker *mask.Registry
+	if cfg.Mask != nil {
+		masker = mask.NewRegistry(cfg.Mask, mask.Options{Debug: cfg.MaskDebug, Logger: log})
+		log.Info("маскирование включено", "rules", cfg.MaskRules, "summary", cfg.Mask.Summary(),
+			"on_error", string(cfg.MaskOnError))
+		if cfg.MaskDebug {
+			log.Warn("включён --mask-debug: настоящие значения IP, хостов и секретов пишутся в лог открытым текстом")
+		}
+	}
+
 	gw := gateway.New(gateway.Options{
 		Mode:         cfg.Mode,
 		Tokens:       cfg.Tokens,
@@ -50,6 +64,8 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 		UpstreamKey:  cfg.UpstreamKey,
 		MaxBodyBytes: cfg.MaxBodyBytes,
 		Logger:       log,
+		Masker:       masker,
+		MaskOnError:  cfg.MaskOnError,
 	})
 
 	srv := &http.Server{
