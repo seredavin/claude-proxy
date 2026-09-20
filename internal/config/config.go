@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/seredavin/claude-proxy/internal/auth"
+	"github.com/seredavin/claude-proxy/internal/mask"
 )
 
 // Mode — способ, которым клиент доказывает право на шлюз, и то, чем шлюз
@@ -46,6 +47,17 @@ const (
 	// TLSNone — слушатель без TLS. Допустим только на loopback: шлюз живёт
 	// на одной машине с клиентами, и сертификат там ничего не защищает.
 	TLSNone TLSSource = "none"
+)
+
+// MaskPolicy — что делать с телом запроса, которое не удалось замаскировать.
+type MaskPolicy string
+
+const (
+	// MaskClosed — не отправлять на апстрим, клиенту ошибка. По умолчанию:
+	// раз маскирование включено, немаскированный трафик наружу не уходит.
+	MaskClosed MaskPolicy = "closed"
+	// MaskOpen — отправить как есть и предупредить в логе.
+	MaskOpen MaskPolicy = "open"
 )
 
 // Пути по умолчанию. Совпадают с тем, что прописывает подкоманда install.
@@ -82,6 +94,14 @@ type Config struct {
 	StateDir     string
 	MaxBodyBytes int64
 	LogFormat    string
+
+	// MaskRules — путь к файлу правил маскирования; пусто — маскирование
+	// выключено, шлюз тела не читает. Mask — разобранные правила.
+	MaskRules   string
+	Mask        *mask.Rules
+	MaskOnError MaskPolicy
+	// MaskDebug — писать пары «значение → суррогат» в лог. Секреты в логе.
+	MaskDebug bool
 }
 
 // Raw — значения до разбора и валидации. Отдельный тип нужен подкоманде
@@ -103,6 +123,11 @@ type Raw struct {
 	StateDir      string
 	MaxBody       string
 	LogFormat     string
+	MaskRules     string
+	// MaskOnError и MaskDebug пустые по умолчанию: так видно, задал ли их
+	// оператор явно — без файла правил они бессмысленны.
+	MaskOnError string
+	MaskDebug   string
 }
 
 // Getenv — источник переменных окружения. Параметризован ради тестов.
@@ -133,6 +158,9 @@ func (r *Raw) bindings() []binding {
 		{&r.StateDir, "state-dir", []string{"CLAUDE_PROXY_STATE_DIR"}},
 		{&r.MaxBody, "max-body", []string{"CLAUDE_PROXY_MAX_BODY"}},
 		{&r.LogFormat, "log-format", []string{"CLAUDE_PROXY_LOG_FORMAT"}},
+		{&r.MaskRules, "mask-rules", []string{"CLAUDE_PROXY_MASK_RULES"}},
+		{&r.MaskOnError, "mask-on-error", []string{"CLAUDE_PROXY_MASK_ON_ERROR"}},
+		{&r.MaskDebug, "mask-debug", []string{"CLAUDE_PROXY_MASK_DEBUG"}},
 	}
 }
 
@@ -186,6 +214,12 @@ func Bind(fs *flag.FlagSet) *Raw {
 	fs.StringVar(&r.StateDir, "state-dir", d.StateDir, "каталог состояния: кэш ACME, самоподписанные сертификаты")
 	fs.StringVar(&r.MaxBody, "max-body", d.MaxBody, "предел размера тела запроса (например 100m)")
 	fs.StringVar(&r.LogFormat, "log-format", d.LogFormat, "формат логов: text | json")
+	fs.StringVar(&r.MaskRules, "mask-rules", d.MaskRules,
+		"файл правил маскирования IP, хостов и секретов; задан — маскирование включено")
+	fs.StringVar(&r.MaskOnError, "mask-on-error", d.MaskOnError,
+		"тело не удалось замаскировать: closed — отказ клиенту (по умолчанию), open — отправить как есть")
+	fs.BoolFunc("mask-debug", "писать в лог каждую подстановку с настоящим значением (секреты в логе!)",
+		func(v string) error { r.MaskDebug = v; return nil })
 
 	return &r
 }
@@ -239,6 +273,32 @@ func Resolve(r Raw) (*Config, error) {
 		StateDir:      strings.TrimSpace(r.StateDir),
 		UpstreamKey:   strings.TrimSpace(r.UpstreamKey),
 		LogFormat:     strings.TrimSpace(r.LogFormat),
+		MaskRules:     strings.TrimSpace(r.MaskRules),
+		MaskOnError:   MaskClosed,
+	}
+
+	switch policy := MaskPolicy(strings.ToLower(strings.TrimSpace(r.MaskOnError))); policy {
+	case "":
+	case MaskClosed, MaskOpen:
+		c.MaskOnError = policy
+	default:
+		return nil, fmt.Errorf("недопустимый mask-on-error %q (ожидается closed или open)", r.MaskOnError)
+	}
+	if v := strings.TrimSpace(r.MaskDebug); v != "" {
+		debug, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("mask-debug: %q не похоже на булево значение", r.MaskDebug)
+		}
+		c.MaskDebug = debug
+	}
+	// Флаги маскирования без файла правил — скорее всего забыли сам файл.
+	if c.MaskRules == "" {
+		if strings.TrimSpace(r.MaskOnError) != "" {
+			return nil, fmt.Errorf("--mask-on-error имеет смысл только вместе с --mask-rules")
+		}
+		if c.MaskDebug {
+			return nil, fmt.Errorf("--mask-debug имеет смысл только вместе с --mask-rules")
+		}
 	}
 
 	switch Mode(strings.ToLower(strings.TrimSpace(r.Mode))) {
@@ -293,6 +353,16 @@ func Resolve(r Raw) (*Config, error) {
 
 	if err := c.validate(); err != nil {
 		return nil, err
+	}
+
+	// Файл правил читается здесь, а не при старте сервера: ошибка с номером
+	// строки должна всплыть до занятия портов и до запуска claude в local.
+	if c.MaskRules != "" {
+		rules, err := mask.LoadRules(c.MaskRules)
+		if err != nil {
+			return nil, err
+		}
+		c.Mask = rules
 	}
 	return c, nil
 }
