@@ -322,6 +322,79 @@ func TestRunБезTLSПередСледующимЗвеном(t *testing.T) {
 	}
 }
 
+// Порт 0: адрес узнаётся из уведомления о готовности, а не из конфигурации,
+// и к моменту уведомления слушатель уже принимает соединения.
+func TestRunReadyСообщаетФактическийАдрес(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "upstream ok")
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Mode:         config.ModeOAuth,
+		Listen:       "127.0.0.1:0",
+		Tokens:       tokensOf(t, "default:secret"),
+		Upstream:     target,
+		TLS:          config.TLSNone,
+		MaxBodyBytes: 1 << 20,
+		LogFormat:    "text",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan net.Addr, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- RunReady(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), func(a net.Addr) { ready <- a })
+	}()
+
+	var addr net.Addr
+	select {
+	case addr = <-ready:
+	case err := <-done:
+		t.Fatalf("шлюз завершился до готовности: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("уведомление о готовности не пришло")
+	}
+	_, port, err := net.SplitHostPort(addr.String())
+	if err != nil || port == "0" || port == "" {
+		t.Fatalf("адрес готовности %q без настоящего порта", addr)
+	}
+
+	// Без ожидания и повторов: готовность означает, что сокет уже слушает.
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + addr.String() + "/healthz")
+	if err != nil {
+		t.Fatalf("/healthz сразу после готовности: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("/healthz = %d", resp.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("остановка: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("шлюз не остановился")
+	}
+
+	// Порт свободен: занимаем его сами.
+	ln, err := net.Listen("tcp", addr.String())
+	if err != nil {
+		t.Fatalf("порт не освободился: %v", err)
+	}
+	_ = ln.Close()
+}
+
 func tokensOf(t *testing.T, spec string) auth.Set {
 	t.Helper()
 	set, err := auth.Parse(spec)

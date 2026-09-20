@@ -42,6 +42,8 @@ func dispatch(args []string) error {
 	switch command {
 	case "run":
 		return cmdRun(args)
+	case "local":
+		return cmdLocal(args)
 	case "install":
 		return cmdInstall(args)
 	case "uninstall":
@@ -72,6 +74,7 @@ func usage(w io.Writer) {
 
 Команды:
   run           Запустить шлюз (команда по умолчанию).
+  local         Запустить claude через локальное звено цепочки без TLS.
   install       Разложить бинарь, конфигурацию и systemd-юнит, запустить сервис.
   uninstall     Остановить сервис и убрать юнит. С --purge — снести всё.
   gen-token     Сгенерировать токен шлюза.
@@ -243,13 +246,9 @@ func cmdClientEnv(args []string) error {
 
 // resolve достраивает конфигурацию: флаги, затем файл, затем окружение.
 func resolve(raw *config.Raw, fs *flag.FlagSet, envFile string) (*config.Config, []string, error) {
-	getenv := config.Getenv(os.Getenv)
-	if envFile != "" {
-		if vars, err := config.LoadEnvFile(envFile); err == nil {
-			getenv = config.EnvWithFallback(vars)
-		} else if !os.IsNotExist(err) {
-			return nil, nil, fmt.Errorf("чтение %s: %w", envFile, err)
-		}
+	getenv, err := envSource(envFile)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	warnings := config.ApplyEnv(raw, fs, getenv)
@@ -258,6 +257,23 @@ func resolve(raw *config.Raw, fs *flag.FlagSet, envFile string) (*config.Config,
 		return nil, nil, err
 	}
 	return cfg, warnings, nil
+}
+
+// envSource — окружение процесса с подстраховкой из файла envFile.
+// Отсутствие файла — не ошибка, любая другая проблема чтения — ошибка.
+func envSource(envFile string) (config.Getenv, error) {
+	getenv := config.Getenv(os.Getenv)
+	if envFile == "" {
+		return getenv, nil
+	}
+	vars, err := config.LoadEnvFile(envFile)
+	if err == nil {
+		return config.EnvWithFallback(vars), nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("чтение %s: %w", envFile, err)
+	}
+	return getenv, nil
 }
 
 func newLogger(format string) *slog.Logger {

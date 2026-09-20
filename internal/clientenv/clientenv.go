@@ -9,33 +9,90 @@ import (
 	"github.com/seredavin/claude-proxy/internal/config"
 )
 
-// Render собирает блок команд export для целевой машины.
+// Плейсхолдер токена подписки: настоящий живёт на клиенте, шлюз его не знает.
+const AuthTokenPlaceholder = "sk-ant-oat01-..."
+
+// Var — одна строка клиентского окружения.
 //
-// token — значение одного из токенов шлюза. Пустое значение выводится
+// Пустое Name — строка-комментарий (Comment целиком). Unset — переменную
+// надо убрать, а не задать. Comment у переменной — пояснение в той же строке.
+type Var struct {
+	Name    string
+	Value   string
+	Unset   bool
+	Comment string
+}
+
+// Vars — набор переменных для клиентской машины в порядке печати.
+//
+// token — значение одного из токенов шлюза. Пустое значение подставляется
 // плейсхолдером: так удобно печатать инструкцию, не зная секрета.
-func Render(cfg *config.Config, token string) string {
+//
+// Один источник и для Render, и для запуска claude из своего процесса —
+// так они не могут разойтись в том, что именно клиенту нужно.
+func Vars(cfg *config.Config, token string) []Var {
 	if token == "" {
 		token = "<GATEWAY_TOKEN>"
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "export ANTHROPIC_BASE_URL=%s\n", baseURL(cfg))
+	vars := []Var{{Name: "ANTHROPIC_BASE_URL", Value: baseURL(cfg)}}
 
 	if cfg.Mode == config.ModeAPIKey {
 		// Ключ Console подставляет сам шлюз, клиенту нужен только пропуск.
-		fmt.Fprintf(&b, "export ANTHROPIC_AUTH_TOKEN=%s\n", token)
-		b.WriteString("unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN\n")
-		return b.String()
+		return append(vars,
+			Var{Name: "ANTHROPIC_AUTH_TOKEN", Value: token},
+			Var{Name: "ANTHROPIC_API_KEY", Unset: true},
+			Var{Name: "CLAUDE_CODE_OAUTH_TOKEN", Unset: true},
+		)
 	}
 
-	fmt.Fprintf(&b, "export ANTHROPIC_CUSTOM_HEADERS=\"X-Gateway-Key: %s\"\n", token)
-	b.WriteString("export ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...   # получить: claude setup-token\n")
-	b.WriteString("# Служебный трафик Claude Code идёт напрямую на api.anthropic.com мимо шлюза.\n")
-	b.WriteString("# В изолированной сети его надо отключить, иначе CLI падает на старте:\n")
-	b.WriteString("export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\n")
-	b.WriteString("export CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1\n")
-	b.WriteString("export CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS=1\n")
-	b.WriteString("unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY\n")
+	return append(vars,
+		Var{Name: "ANTHROPIC_CUSTOM_HEADERS", Value: "X-Gateway-Key: " + token},
+		Var{Name: "ANTHROPIC_AUTH_TOKEN", Value: AuthTokenPlaceholder, Comment: "получить: claude setup-token"},
+		Var{Comment: "Служебный трафик Claude Code идёт напрямую на api.anthropic.com мимо шлюза."},
+		Var{Comment: "В изолированной сети его надо отключить, иначе CLI падает на старте:"},
+		Var{Name: "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", Value: "1"},
+		Var{Name: "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", Value: "1"},
+		Var{Name: "CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS", Value: "1"},
+		Var{Name: "CLAUDE_CODE_OAUTH_TOKEN", Unset: true},
+		Var{Name: "ANTHROPIC_API_KEY", Unset: true},
+	)
+}
+
+// Render собирает блок команд export для целевой машины из Vars.
+func Render(cfg *config.Config, token string) string {
+	var b strings.Builder
+	var unset []string
+	flush := func() {
+		if len(unset) > 0 {
+			b.WriteString("unset " + strings.Join(unset, " ") + "\n")
+			unset = nil
+		}
+	}
+
+	for _, v := range Vars(cfg, token) {
+		switch {
+		case v.Unset:
+			// Соседние unset собираются в одну строку.
+			unset = append(unset, v.Name)
+			continue
+		case v.Name == "":
+			flush()
+			b.WriteString("# " + v.Comment + "\n")
+			continue
+		}
+		flush()
+		value := v.Value
+		if strings.ContainsAny(value, " \t") {
+			value = `"` + value + `"`
+		}
+		fmt.Fprintf(&b, "export %s=%s", v.Name, value)
+		if v.Comment != "" {
+			b.WriteString("   # " + v.Comment)
+		}
+		b.WriteString("\n")
+	}
+	flush()
 	return b.String()
 }
 

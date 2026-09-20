@@ -51,7 +51,7 @@
 | `--upstream-key` | `CLAUDE_PROXY_UPSTREAM_KEY` | — | Пропуск на следующее звено цепочки |
 | `--max-body` | `CLAUDE_PROXY_MAX_BODY` | `100m` | Предел тела запроса |
 | `--log-format` | `CLAUDE_PROXY_LOG_FORMAT` | `text` | `text` или `json` |
-| `--env-file` | — | у `install` и `client-env` — `/etc/claude-proxy/claude-proxy.env` | Файл, откуда брать переменные, если их нет в окружении |
+| `--env-file` | — | у `install` и `client-env` — `/etc/claude-proxy/claude-proxy.env`, у `local` — `~/.config/claude-proxy/local.env` | Файл, откуда брать переменные, если их нет в окружении |
 
 Установленный сервис читает `/etc/claude-proxy/claude-proxy.env` (режим `600`).
 После правки файла нужен `systemctl restart claude-proxy`.
@@ -222,6 +222,10 @@ claude-proxy run --tls none --listen 127.0.0.1:9443 --tokens "local:<токен>
 `ANTHROPIC_BASE_URL=http://127.0.0.1:9443` — адрес слушателя, без доверия к
 сертификату.
 
+Для самого частого случая — локальное звено цепочки на машине с Claude Code —
+есть команда `local`, которая поднимает такой шлюз и запускает `claude`
+одним действием: см. [«Локальное звено на ноутбуке»](#локальное-звено-на-ноутбуке).
+
 ### Доверие к сертификату на клиентах
 
 Нужно для внутреннего CA и самоподписанного; для Let's Encrypt всё работает
@@ -295,10 +299,59 @@ CLAUDE_PROXY_UPSTREAM_KEY="<токен звена B>"
 ### Локальное звено на ноутбуке
 
 Частный случай: звено A живёт на той же машине, что и Claude Code. Тогда
-ему не нужен сертификат — [`--tls none`](#none--без-tls-только-loopback):
+ему не нужен сертификат — [`--tls none`](#none--без-tls-только-loopback), а
+поднимать его руками не нужно вовсе: команда `local` делает это сама.
+
+Один раз — файл настроек `~/.config/claude-proxy/local.env`:
+
+```dotenv
+CLAUDE_PROXY_UPSTREAM=https://edge.example.com:9443
+CLAUDE_PROXY_UPSTREAM_KEY=<токен звена B>
+ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...   # получить: claude setup-token
+```
+
+Файл содержит секреты — `chmod 600`. Дальше вместо `claude`:
 
 ```bash
-LOCAL_TOKEN=$(claude-proxy gen-token | sed 's/^default://')
+claude-proxy local
+claude-proxy local -p "вопрос"        # аргументы уходят claude как есть
+claude-proxy local -- --resume        # или после --, если они похожи на флаги
+```
+
+Команда поднимает звено на свободном порту `127.0.0.1`, выставляет `claude`
+те же переменные, что печатает `client-env` (`ANTHROPIC_BASE_URL` по `http`,
+`X-Gateway-Key`, отключение служебного трафика; `CLAUDE_CODE_OAUTH_TOKEN` и
+`ANTHROPIC_API_KEY` снимаются), запускает его и гасит звено, когда `claude`
+выходит. Код выхода — от `claude`. Пропуск звена генерируется на каждый
+запуск и живёт только в окружении `claude` — хранить его негде и незачем.
+
+`Ctrl+C` достаётся `claude`: прерывает генерацию или выходит — по его
+правилам; звено при этом живёт, пока жив `claude`.
+
+Что ещё можно задать:
+
+| Флаг | По умолчанию | Назначение |
+|------|--------------|------------|
+| `--env-file` | `~/.config/claude-proxy/local.env` | Файл настроек; отсутствие — не ошибка |
+| `--claude` | `claude` | Исполняемый файл `claude`, если он не в `PATH` |
+| `--log-file` | `~/.local/state/claude-proxy/local.log` | Лог звена; в терминал он не пишется, чтобы не мешать интерфейсу |
+| `--listen` | `127.0.0.1:0` | Фиксированный порт, если нужно постучаться `curl`-ом |
+
+Остальные флаги и переменные — как у `run`; `--tls` зафиксирован в `none`.
+`$XDG_CONFIG_HOME` и `$XDG_STATE_HOME` уважаются. Перед запуском `claude` в
+stderr печатается одна строка — адрес звена, апстрим и путь к логу.
+
+Без `--upstream-key` команда не стартует: локальное звено — первое звено
+цепочки, прямой путь на Anthropic через лишний процесс никому не нужен.
+Без `ANTHROPIC_AUTH_TOKEN` в режиме `oauth` — тоже.
+
+#### Вручную, через `run`
+
+То же самое можно собрать из `run --tls none` — например, чтобы держать
+звено поднятым дольше одной сессии:
+
+```bash
+LOCAL_TOKEN=$(claude-proxy gen-token)
 
 claude-proxy run --tls none --listen 127.0.0.1:9443 \
   --tokens "local:$LOCAL_TOKEN" \
@@ -611,3 +664,9 @@ sudo claude-proxy uninstall --purge  # снести всё, включая то�
   горутину. Это осознанный компромисс — тело читается только после проверки
   токена, поэтому занять ресурсы так может лишь тот, у кого пропуск на шлюз
   уже есть.
+- `local` на время жизни `claude` подписывается на `SIGINT` через
+  `signal.Notify` и не реагирует, а не ставит `signal.Ignore`: диспозиция
+  `SIG_IGN` переживает `exec` и досталась бы `claude`, который тогда перестал
+  бы реагировать на `Ctrl+C`. Обработчик Go у ребёнка сбрасывается в
+  умолчание. Переменные `claude` берутся из того же `clientenv.Vars`, что
+  печатает `client-env`, — два пути не могут разойтись.
