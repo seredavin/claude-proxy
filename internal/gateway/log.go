@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/seredavin/claude-proxy/internal/trace"
 )
 
 // statusClientClosed — клиент отсоединился, не дождавшись ответа.
@@ -21,6 +23,8 @@ type recorder struct {
 	wroteHeader bool
 	// mask — счётчики маскирования; nil, когда оно выключено.
 	mask *maskState
+	// trace — трасса запроса; nil, когда трассировка выключена.
+	trace *traceState
 }
 
 func (r *recorder) WriteHeader(status int) {
@@ -29,6 +33,9 @@ func (r *recorder) WriteHeader(status int) {
 	}
 	r.wroteHeader = true
 	r.status = status
+	if r.trace != nil {
+		r.trace.clientOut = r.trace.rec.ResponseWriter(trace.Client)
+	}
 	r.ResponseWriter.WriteHeader(status)
 }
 
@@ -38,6 +45,9 @@ func (r *recorder) Write(b []byte) (int, error) {
 	}
 	n, err := r.ResponseWriter.Write(b)
 	r.written += int64(n)
+	if r.trace != nil && n > 0 {
+		_, _ = r.trace.clientOut.Write(b[:n])
+	}
 	return n, err
 }
 
@@ -80,6 +90,23 @@ func (g *Gateway) logAccess(rec *recorder, r *http.Request, start time.Time, tok
 		level = slog.LevelError
 	}
 	g.log.Log(r.Context(), level, "request", attrs...)
+
+	if rec.trace != nil {
+		meta := trace.Meta{
+			DurationMs:      time.Since(start).Milliseconds(),
+			Method:          r.Method,
+			Path:            r.URL.Path,
+			Status:          rec.status,
+			Token:           tokenLabel,
+			RequestHeaders:  rec.trace.requestHeaders,
+			UpstreamHeaders: rec.trace.upstreamHeaders,
+		}
+		if rec.mask != nil {
+			st := rec.mask.counters()
+			meta.Mask = &trace.MaskMeta{Masked: st.Masked, Unmasked: st.Unmasked, Errors: st.Errors}
+		}
+		rec.trace.rec.Finish(meta)
+	}
 }
 
 // remoteIP отбрасывает порт: в логе он только шумит.

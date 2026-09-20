@@ -24,6 +24,7 @@ import (
 	"github.com/seredavin/claude-proxy/internal/auth"
 	"github.com/seredavin/claude-proxy/internal/config"
 	"github.com/seredavin/claude-proxy/internal/mask"
+	"github.com/seredavin/claude-proxy/internal/trace"
 )
 
 // Таймауты общения с Anthropic. Длинные генерации на дефолтных 60s рвутся.
@@ -55,6 +56,9 @@ type Options struct {
 	Masker      *mask.Registry
 	MaskOnError config.MaskPolicy
 
+	// Tracer — трассировка тел в каталог. nil — выключена.
+	Tracer *trace.Tracer
+
 	// Transport подменяется в тестах. Пустое значение — транспорт по умолчанию.
 	Transport http.RoundTripper
 }
@@ -71,6 +75,7 @@ type Gateway struct {
 
 	masker      *mask.Registry
 	maskOnError config.MaskPolicy
+	tracer      *trace.Tracer
 }
 
 // New собирает шлюз.
@@ -92,6 +97,7 @@ func New(opts Options) *Gateway {
 		log:         opts.Logger,
 		masker:      opts.Masker,
 		maskOnError: opts.MaskOnError,
+		tracer:      opts.Tracer,
 	}
 
 	g.proxy = &httputil.ReverseProxy{
@@ -120,8 +126,13 @@ func New(opts Options) *Gateway {
 			if opts.Masker != nil {
 				pr.Out.Header.Del("Accept-Encoding")
 			}
+
+			// Заголовки к апстриму — в трассу уже после зачистки.
+			if ts, _ := pr.Out.Context().Value(traceStateKey{}).(*traceState); ts != nil {
+				ts.requestHeaders = trace.Headers(pr.Out.Header)
+			}
 		},
-		ModifyResponse: g.unmaskResponse,
+		ModifyResponse: g.modifyResponse,
 		// -1 — писать клиенту сразу, не накапливая буфер. Без этого ломается
 		// SSE: ответ приходит одним куском в конце генерации.
 		FlushInterval: -1,
@@ -187,6 +198,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Трасса начинается до проверки предела тела: отказ 413 тоже должен
+	// оставить meta.json и тело ответа.
+	if g.tracer != nil {
+		rec.trace = &traceState{rec: g.tracer.Begin()}
+		r = r.WithContext(context.WithValue(r.Context(), traceStateKey{}, rec.trace))
+	}
+
 	if g.maxBody > 0 {
 		if r.ContentLength > g.maxBody {
 			writeError(rec, http.StatusRequestEntityTooLarge, "request_too_large",
@@ -197,18 +215,81 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, g.maxBody)
 	}
 
-	if g.masker != nil {
-		state := &maskState{session: g.masker.Session(label)}
-		rec.mask = state
-		r = r.WithContext(context.WithValue(r.Context(), maskStateKey{}, state))
-		if !g.maskRequest(rec, r, state) {
+	// Тело читается целиком только когда его надо переписать или записать.
+	if g.masker != nil || rec.trace != nil {
+		body, ok := g.readBody(rec, r)
+		if !ok {
 			g.logAccess(rec, r, start, label)
 			return
+		}
+		if rec.trace != nil {
+			rec.trace.rec.WriteRequest(trace.Client, body)
+		}
+		if g.masker != nil {
+			state := &maskState{session: g.masker.Session(label)}
+			rec.mask = state
+			r = r.WithContext(context.WithValue(r.Context(), maskStateKey{}, state))
+			if body, ok = g.maskBody(rec, state, body); !ok {
+				g.logAccess(rec, r, start, label)
+				return
+			}
+		}
+		setBody(r, body)
+		if rec.trace != nil {
+			rec.trace.rec.WriteRequest(trace.Upstream, body)
 		}
 	}
 
 	g.proxy.ServeHTTP(rec, r)
 	g.logAccess(rec, r, start, label)
+}
+
+// traceStateKey — ключ контекста, по которому Rewrite и ModifyResponse
+// находят трассу запроса.
+type traceStateKey struct{}
+
+// traceState — трасса одного запроса и заголовки, собранные по пути.
+type traceState struct {
+	rec             *trace.Record
+	requestHeaders  map[string]string
+	upstreamHeaders map[string]string
+	// clientOut — writer тела ответа клиенту; создаётся при первом
+	// WriteHeader, чтобы пустой ответ тоже оставил файл.
+	clientOut *trace.ResponseWriter
+}
+
+// readBody читает тело запроса целиком. false — запрос завершён ошибкой.
+func (g *Gateway) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil, true
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		// MaxBytesReader уже пометил соединение на закрытие; прочие ошибки
+		// чтения — клиент оборвал передачу.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("request body exceeds gateway limit of %d bytes", g.maxBody))
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "gateway could not read request body")
+		}
+		return nil, false
+	}
+	return body, true
+}
+
+// setBody подменяет тело запроса прочитанными байтами.
+func setBody(r *http.Request, body []byte) {
+	if len(body) == 0 {
+		r.Body = http.NoBody
+		r.ContentLength = 0
+		r.Header.Del("Content-Length")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 }
 
 // maskStateKey — ключ контекста, по которому ModifyResponse находит
@@ -234,48 +315,45 @@ func (m *maskState) counters() mask.Stats {
 	return st
 }
 
-// maskRequest читает тело целиком и подменяет его замаскированным.
-// Возвращает false, если запрос завершён ошибкой и на апстрим не идёт.
-func (g *Gateway) maskRequest(w http.ResponseWriter, r *http.Request, state *maskState) bool {
-	if r.Body == nil || r.Body == http.NoBody {
-		return true
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		// MaxBytesReader уже ответил 413 сам; прочие ошибки чтения —
-		// клиент оборвал передачу.
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large",
-				fmt.Sprintf("request body exceeds gateway limit of %d bytes", g.maxBody))
-		} else {
-			writeError(w, http.StatusBadRequest, "invalid_request_error", "gateway could not read request body")
-		}
-		return false
-	}
+// maskBody маскирует прочитанное тело. Возвращает байты для апстрима;
+// false — запрос завершён ошибкой и на апстрим не идёт.
+func (g *Gateway) maskBody(w http.ResponseWriter, state *maskState, body []byte) ([]byte, bool) {
 	if len(body) == 0 {
-		r.Body = http.NoBody
-		return true
+		return body, true
 	}
-
 	masked, stats, err := state.session.MaskRequest(body)
 	if err != nil {
 		if g.maskOnError == config.MaskOpen {
 			g.log.Warn("тело не замаскировано, отправлено как есть", "token", state.session.Label(), "err", err)
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			r.ContentLength = int64(len(body))
-			return true
+			return body, true
 		}
 		g.log.Warn("тело не замаскировано, запрос отклонён", "token", state.session.Label(), "err", err)
 		writeError(w, http.StatusBadRequest, "invalid_request_error",
 			"gateway could not mask request: "+err.Error())
-		return false
+		return nil, false
 	}
 	state.stats = stats
-	r.Body = io.NopCloser(bytes.NewReader(masked))
-	r.ContentLength = int64(len(masked))
-	r.Header.Set("Content-Length", strconv.Itoa(len(masked)))
-	return true
+	return masked, true
+}
+
+// modifyResponse — трасса ответа апстрима (до демаскирования, байт в байт),
+// затем демаскирование.
+func (g *Gateway) modifyResponse(resp *http.Response) error {
+	if ts, _ := resp.Request.Context().Value(traceStateKey{}).(*traceState); ts != nil {
+		ts.upstreamHeaders = trace.Headers(resp.Header)
+		resp.Body = readCloser{
+			Reader: io.TeeReader(resp.Body, ts.rec.ResponseWriter(trace.Upstream)),
+			Closer: resp.Body,
+		}
+	}
+	return g.unmaskResponse(resp)
+}
+
+// readCloser — TeeReader с исходным Close: закрывать тело апстрима должен
+// прокси, а не трасса.
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // unmaskResponse возвращает исходные значения в ответ апстрима. Сбой
