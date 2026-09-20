@@ -329,6 +329,7 @@ func envLines(raw config.Raw) []string {
 		{"CLAUDE_PROXY_MASK_RULES", raw.MaskRules},
 		{"CLAUDE_PROXY_MASK_ON_ERROR", raw.MaskOnError},
 		{"CLAUDE_PROXY_MASK_DEBUG", raw.MaskDebug},
+		{"CLAUDE_PROXY_TRACE_DIR", raw.TraceDir},
 	}
 
 	var lines []string

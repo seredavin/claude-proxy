@@ -83,3 +83,18 @@ func TestМаскированиеПеременнаяПеребиваетФла�
 		t.Errorf("warnings = %v", warnings)
 	}
 }
+
+func TestTraceDirИзФлагаИПеременной(t *testing.T) {
+	cfg, _, err := load(t, append(append([]string{}, maskBase...), "--trace-dir", "/tmp/trace"), nil)
+	if err != nil || cfg.TraceDir != "/tmp/trace" {
+		t.Errorf("cfg.TraceDir = %q err = %v", cfg.TraceDir, err)
+	}
+	cfg, _, err = load(t, maskBase, map[string]string{"CLAUDE_PROXY_TRACE_DIR": "/var/trace"})
+	if err != nil || cfg.TraceDir != "/var/trace" {
+		t.Errorf("cfg.TraceDir = %q err = %v", cfg.TraceDir, err)
+	}
+	cfg, _, err = load(t, maskBase, nil)
+	if err != nil || cfg.TraceDir != "" {
+		t.Errorf("по умолчанию выключено: %q err = %v", cfg.TraceDir, err)
+	}
+}

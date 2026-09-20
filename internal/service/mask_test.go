@@ -46,3 +46,15 @@ func TestФайлПравилНедоступенСервисномуПольз�
 		t.Errorf("владелец должен читать: %v", err)
 	}
 }
+
+func TestEnvLinesTraceDir(t *testing.T) {
+	raw := config.Defaults()
+	raw.Tokens = "default:abc"
+	if strings.Contains(strings.Join(envLines(raw), "\n"), "CLAUDE_PROXY_TRACE_DIR") {
+		t.Error("без каталога переменной быть не должно")
+	}
+	raw.TraceDir = "/var/lib/claude-proxy/trace"
+	if !strings.Contains(strings.Join(envLines(raw), "\n"), `CLAUDE_PROXY_TRACE_DIR="/var/lib/claude-proxy/trace"`) {
+		t.Error("каталог не попал в файл")
+	}
+}

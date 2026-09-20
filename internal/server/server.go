@@ -14,6 +14,7 @@ import (
 	"github.com/seredavin/claude-proxy/internal/gateway"
 	"github.com/seredavin/claude-proxy/internal/mask"
 	"github.com/seredavin/claude-proxy/internal/tlsconf"
+	"github.com/seredavin/claude-proxy/internal/trace"
 )
 
 const (
@@ -56,6 +57,16 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 		}
 	}
 
+	var tracer *trace.Tracer
+	if cfg.TraceDir != "" {
+		tracer, err = trace.New(cfg.TraceDir, trace.Options{Logger: log})
+		if err != nil {
+			return err
+		}
+		log.Warn("включена трассировка: тела запросов и ответов с настоящими значениями пишутся на диск",
+			"dir", cfg.TraceDir)
+	}
+
 	gw := gateway.New(gateway.Options{
 		Mode:         cfg.Mode,
 		Tokens:       cfg.Tokens,
@@ -66,6 +77,7 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 		Logger:       log,
 		Masker:       masker,
 		MaskOnError:  cfg.MaskOnError,
+		Tracer:       tracer,
 	})
 
 	srv := &http.Server{
