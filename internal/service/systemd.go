@@ -78,8 +78,11 @@ func Install(opts InstallOptions) error {
 		return err
 	}
 
-	if err := prepareStateDir(opts.Resolved.StateDir, runAs, out); err != nil {
-		return err
+	// Без TLS каталог состояния не нужен и может быть не задан вовсе.
+	if opts.Resolved.StateDir != "" {
+		if err := prepareStateDir(opts.Resolved.StateDir, runAs, out); err != nil {
+			return err
+		}
 	}
 
 	// В режиме files сервис читает чужие файлы — проверяем это заранее,
@@ -109,7 +112,8 @@ func Install(opts InstallOptions) error {
 			opts.Resolved.Domain)
 	}
 
-	if err := waitHealthy(opts.Resolved.Listen, opts.Resolved.Domain, timeout); err != nil {
+	plain := opts.Resolved.TLS == config.TLSNone
+	if err := waitHealthy(opts.Resolved.Listen, opts.Resolved.Domain, plain, timeout); err != nil {
 		if opts.Resolved.TLS == config.TLSAuto {
 			return fmt.Errorf("%w\n    частые причины: порт 80 закрыт снаружи, A-запись ведёт не на этот хост, исчерпан лимит Let's Encrypt\n    логи: journalctl -u %s -n 50", err, config.ServiceName)
 		}
@@ -369,8 +373,12 @@ func writeUnit(binPath, runAs, stateDir string, out io.Writer) error {
 	// только для пути по умолчанию, иначе systemd плодил бы рядом пустой
 	// /var/lib/claude-proxy, которым никто не пользуется.
 	stateLines := "ReadWritePaths=" + stateDir + "\n"
-	if stateDir == config.DefaultStateDir {
+	switch stateDir {
+	case config.DefaultStateDir:
 		stateLines = fmt.Sprintf("StateDirectory=%s\nStateDirectoryMode=0700\n", config.ServiceName)
+	case "":
+		// --tls none без каталога состояния: сервису некуда писать.
+		stateLines = ""
 	}
 
 	unit := fmt.Sprintf(`[Unit]
@@ -445,8 +453,12 @@ func checkCertReadable(cfg *config.Config, runAs string, out io.Writer) {
 // name». Заодно первый такой запрос и запускает выпуск сертификата, поэтому
 // установка честно падает здесь, если Let's Encrypt не может достучаться
 // до порта 80.
-func waitHealthy(listen, serverName string, timeout time.Duration) error {
-	_, port, err := net.SplitHostPort(listen)
+//
+// plain — слушатель без TLS (источник none): запрос идёт по http, имя
+// сервера не нужно, а соединение — на тот loopback-адрес, который задан
+// слушателю: сокет на [::1] по 127.0.0.1 недоступен.
+func waitHealthy(listen, serverName string, plain bool, timeout time.Duration) error {
+	listenHost, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return fmt.Errorf("не разобрать адрес %q: %w", listen, err)
 	}
@@ -454,21 +466,30 @@ func waitHealthy(listen, serverName string, timeout time.Duration) error {
 		serverName = "localhost"
 	}
 
+	// Стучимся на петлю независимо от того, куда указывает имя:
+	// внутренний DNS может не знать его или вести на внешний адрес.
+	dialHost := "127.0.0.1"
+	if plain {
+		dialHost = listenHost
+	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	client := &http.Client{
-		Timeout: 30 * time.Second, // выпуск сертификата идёт внутри рукопожатия
-		Transport: &http.Transport{
-			// Стучимся на петлю независимо от того, куда указывает имя:
-			// внутренний DNS может не знать его или вести на внешний адрес.
-			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
-			},
-			// Имя проверяем отдельно, после установки. Здесь важно только то,
-			// что шлюз поднялся и смог предъявить сертификат.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, ServerName: serverName}, //nolint:gosec
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, net.JoinHostPort(dialHost, port))
 		},
 	}
-	url := "https://" + net.JoinHostPort(serverName, port) + "/healthz"
+	scheme := "http://"
+	if !plain {
+		// Имя проверяем отдельно, после установки. Здесь важно только то,
+		// что шлюз поднялся и смог предъявить сертификат.
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, ServerName: serverName} //nolint:gosec
+		scheme = "https://"
+	}
+	client := &http.Client{
+		Timeout:   30 * time.Second, // выпуск сертификата идёт внутри рукопожатия
+		Transport: transport,
+	}
+	url := scheme + net.JoinHostPort(serverName, port) + "/healthz"
 
 	var lastErr error
 	deadline := time.Now().Add(timeout)

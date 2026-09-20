@@ -44,9 +44,10 @@ func Run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		Logger:       log,
 	})
 
-	tlsSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           gw,
+	srv := &http.Server{
+		Addr:    cfg.Listen,
+		Handler: gw,
+		// nil — слушатель без TLS (источник none).
 		TLSConfig:         provider.TLSConfig,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
@@ -99,8 +100,12 @@ func Run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 
 	serveErr := make(chan error, 1)
 	go func() {
+		if srv.TLSConfig == nil {
+			serveErr <- srv.Serve(ln)
+			return
+		}
 		// Сертификат и ключ берутся из TLSConfig.GetCertificate.
-		serveErr <- tlsSrv.ServeTLS(ln, "", "")
+		serveErr <- srv.ServeTLS(ln, "", "")
 	}()
 
 	select {
@@ -116,9 +121,9 @@ func Run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	if err := tlsSrv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// Соединения не успели закрыться сами — рвём их.
-		_ = tlsSrv.Close()
+		_ = srv.Close()
 		return fmt.Errorf("остановка не уложилась в %s: %w", shutdownTimeout, err)
 	}
 	return nil

@@ -63,7 +63,7 @@ func startSNIServer(t *testing.T, expectName string) string {
 func TestWaitHealthyПередаётИмяСервера(t *testing.T) {
 	addr := startSNIServer(t, "proxy.example.com")
 
-	if err := waitHealthy(addr, "proxy.example.com", 10*time.Second); err != nil {
+	if err := waitHealthy(addr, "proxy.example.com", false, 10*time.Second); err != nil {
 		t.Fatalf("проверка не прошла, хотя шлюз отвечает: %v", err)
 	}
 }
@@ -74,7 +74,7 @@ func TestWaitHealthyПередаётИмяСервера(t *testing.T) {
 func TestWaitHealthyНеЗависитОтРазрешенияИмени(t *testing.T) {
 	addr := startSNIServer(t, "nonexistent.invalid")
 
-	if err := waitHealthy(addr, "nonexistent.invalid", 10*time.Second); err != nil {
+	if err := waitHealthy(addr, "nonexistent.invalid", false, 10*time.Second); err != nil {
 		t.Fatalf("проверка пошла за DNS вместо петли: %v", err)
 	}
 }
@@ -90,7 +90,7 @@ func TestWaitHealthyСообщаетПричинуОтказа(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = waitHealthy(addr, "proxy.example.com", 2*time.Second)
+	err = waitHealthy(addr, "proxy.example.com", false, 2*time.Second)
 	if err == nil {
 		t.Fatal("молчащий порт не привёл к ошибке")
 	}
@@ -101,5 +101,32 @@ func TestWaitHealthyСообщаетПричинуОтказа(t *testing.T) {
 	// шлюз не поднялся или рукопожатие не состоялось.
 	if !strings.Contains(err.Error(), "connect") && !strings.Contains(err.Error(), "refused") {
 		t.Errorf("в ошибке нет причины: %v", err)
+	}
+}
+
+// Источник none: шлюз слушает обычный HTTP, проверка тоже должна идти по
+// http — рукопожатие TLS с plain-слушателем просто повисло бы.
+//
+// Соединение идёт на адрес слушателя, а не на 127.0.0.1: сокет на [::1]
+// по IPv4-петле недоступен, и проверка ложно падала бы при исправном шлюзе.
+func TestWaitHealthyБезTLS(t *testing.T) {
+	for _, bind := range []string{"127.0.0.1:0", "[::1]:0"} {
+		t.Run(bind, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, "ok\n")
+			})
+			srv := &http.Server{Handler: mux}
+			ln, err := net.Listen("tcp", bind)
+			if err != nil {
+				t.Skipf("адрес %s недоступен: %v", bind, err)
+			}
+			go func() { _ = srv.Serve(ln) }()
+			t.Cleanup(func() { _ = srv.Close() })
+
+			if err := waitHealthy(ln.Addr().String(), "", true, 10*time.Second); err != nil {
+				t.Fatalf("проверка по http не прошла, хотя шлюз отвечает: %v", err)
+			}
+		})
 	}
 }

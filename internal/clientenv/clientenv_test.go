@@ -59,9 +59,41 @@ func TestBaseURLВсегдаСПортом(t *testing.T) {
 		{":9443", "", "https://<имя-шлюза>:9443"},
 	}
 	for _, tc := range tests {
-		got := baseURL(&config.Config{Listen: tc.listen, Domain: tc.domain})
+		got := baseURL(&config.Config{Listen: tc.listen, Domain: tc.domain, TLS: config.TLSSelf})
 		if got != tc.want {
 			t.Errorf("baseURL(listen=%q, domain=%q) = %q, ожидалось %q", tc.listen, tc.domain, got, tc.want)
 		}
+	}
+}
+
+// Без TLS клиент на той же машине: адрес берётся из слушателя, а не из
+// имени шлюза, и никакого доверия к сертификату не требуется.
+func TestBaseURLБезTLS(t *testing.T) {
+	tests := []struct {
+		listen string
+		domain string
+		want   string
+	}{
+		{"127.0.0.1:9443", "", "http://127.0.0.1:9443"},
+		{"[::1]:9443", "", "http://[::1]:9443"},
+		{"localhost:8443", "", "http://localhost:8443"},
+		{"127.0.0.1:9443", "ignored.example.com", "http://127.0.0.1:9443"},
+	}
+	for _, tc := range tests {
+		got := baseURL(&config.Config{Listen: tc.listen, Domain: tc.domain, TLS: config.TLSNone})
+		if got != tc.want {
+			t.Errorf("baseURL(none, listen=%q, domain=%q) = %q, ожидалось %q", tc.listen, tc.domain, got, tc.want)
+		}
+	}
+}
+
+func TestRenderБезTLSПечатаетHTTP(t *testing.T) {
+	cfg := &config.Config{Mode: config.ModeOAuth, Listen: "127.0.0.1:9443", TLS: config.TLSNone}
+	got := Render(cfg, "hexvalue")
+	if !strings.Contains(got, "export ANTHROPIC_BASE_URL=http://127.0.0.1:9443\n") {
+		t.Errorf("нет http-адреса слушателя в:\n%s", got)
+	}
+	if !strings.Contains(got, `export ANTHROPIC_CUSTOM_HEADERS="X-Gateway-Key: hexvalue"`) {
+		t.Errorf("остальные переменные должны совпадать с TLS-вариантом:\n%s", got)
 	}
 }

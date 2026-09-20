@@ -198,6 +198,31 @@ func TestОшибкиВалидации(t *testing.T) {
 			want: "--upstream-key имеет смысл только",
 		},
 		{
+			name: "none без хоста слушает все интерфейсы",
+			args: []string{"--tokens", "a", "--tls", "none", "--listen", ":9443"},
+			want: "--tls none допустим только на loopback",
+		},
+		{
+			name: "none на 0.0.0.0",
+			args: []string{"--tokens", "a", "--tls", "none", "--listen", "0.0.0.0:9443"},
+			want: "--tls none допустим только на loopback",
+		},
+		{
+			name: "none на внешнем адресе",
+			args: []string{"--tokens", "a", "--tls", "none", "--listen", "10.0.0.5:9443"},
+			want: "--tls none допустим только на loopback",
+		},
+		{
+			name: "none на [::]",
+			args: []string{"--tokens", "a", "--tls", "none", "--listen", "[::]:9443"},
+			want: "--tls none допустим только на loopback",
+		},
+		{
+			name: "none не отменяет https для апстрима",
+			args: []string{"--tokens", "a", "--tls", "none", "--listen", "127.0.0.1:9443", "--upstream", "http://edge.example.com:9443"},
+			want: "upstream должен быть https",
+		},
+		{
 			name: "мусор в max-body",
 			args: []string{"--tokens", "a", "--tls", "files", "--cert-file", "c.pem", "--key-file", "k.pem", "--max-body", "много"},
 			want: "max-body",
@@ -280,5 +305,34 @@ func TestUpstreamKeyFromEnv(t *testing.T) {
 	}
 	if cfg.UpstreamKey != "next-secret" {
 		t.Errorf("пропуск на следующее звено = %q, пробелы должны срезаться", cfg.UpstreamKey)
+	}
+}
+
+// Без TLS не нужны ни имя шлюза, ни каталог состояния, ни файлы сертификата —
+// но только на петле.
+func TestNoneСтартуетТолькоНаLoopback(t *testing.T) {
+	for _, listen := range []string{"127.0.0.1:9443", "[::1]:9443", "localhost:9443", "LOCALHOST:9443", "127.0.0.2:9443"} {
+		t.Run(listen, func(t *testing.T) {
+			cfg, _, err := load(t, []string{"--tokens", "a", "--tls", "none", "--listen", listen, "--state-dir", "", "--domain", ""}, nil)
+			if err != nil {
+				t.Fatalf("none на %s должен стартовать: %v", listen, err)
+			}
+			if cfg.TLS != TLSNone {
+				t.Errorf("TLS = %q, ожидалось none", cfg.TLS)
+			}
+		})
+	}
+}
+
+func TestNoneИзПеременнойОкружения(t *testing.T) {
+	cfg, _, err := load(t, []string{"--tokens", "a"}, map[string]string{
+		"CLAUDE_PROXY_TLS":    "none",
+		"CLAUDE_PROXY_LISTEN": "127.0.0.1:9443",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TLS != TLSNone {
+		t.Errorf("TLS = %q, ожидалось none", cfg.TLS)
 	}
 }
