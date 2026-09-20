@@ -87,6 +87,60 @@ func TestBaseURLБезTLS(t *testing.T) {
 	}
 }
 
+// Текст снят с реализации до появления Vars: печать через пары не должна
+// изменить ни одного байта в том, что видят операторы.
+func TestRenderЧерезVarsСовпадаетСПрежнимТекстом(t *testing.T) {
+	oauth := &config.Config{Mode: config.ModeOAuth, Domain: "proxy.example.com", Listen: ":9443", TLS: config.TLSSelf}
+	wantOAuth := "export ANTHROPIC_BASE_URL=https://proxy.example.com:9443\n" +
+		"export ANTHROPIC_CUSTOM_HEADERS=\"X-Gateway-Key: hexvalue\"\n" +
+		"export ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...   # получить: claude setup-token\n" +
+		"# Служебный трафик Claude Code идёт напрямую на api.anthropic.com мимо шлюза.\n" +
+		"# В изолированной сети его надо отключить, иначе CLI падает на старте:\n" +
+		"export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\n" +
+		"export CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1\n" +
+		"export CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS=1\n" +
+		"unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY\n"
+	if got := Render(oauth, "hexvalue"); got != wantOAuth {
+		t.Errorf("oauth:\n--- получено ---\n%s--- ожидалось ---\n%s", got, wantOAuth)
+	}
+
+	apikey := &config.Config{Mode: config.ModeAPIKey, Domain: "proxy.internal", Listen: ":9443", TLS: config.TLSSelf}
+	wantAPIKey := "export ANTHROPIC_BASE_URL=https://proxy.internal:9443\n" +
+		"export ANTHROPIC_AUTH_TOKEN=hexvalue\n" +
+		"unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN\n"
+	if got := Render(apikey, "hexvalue"); got != wantAPIKey {
+		t.Errorf("apikey:\n--- получено ---\n%s--- ожидалось ---\n%s", got, wantAPIKey)
+	}
+}
+
+func TestVarsOAuthСнимаетЧужиеСекреты(t *testing.T) {
+	cfg := &config.Config{Mode: config.ModeOAuth, Listen: "127.0.0.1:9443", TLS: config.TLSNone}
+	unset := map[string]bool{}
+	set := map[string]string{}
+	for _, v := range Vars(cfg, "hexvalue") {
+		switch {
+		case v.Unset:
+			unset[v.Name] = true
+		case v.Name != "":
+			set[v.Name] = v.Value
+		}
+	}
+	for _, name := range []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"} {
+		if !unset[name] {
+			t.Errorf("%s должна сниматься", name)
+		}
+	}
+	if set["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9443" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q", set["ANTHROPIC_BASE_URL"])
+	}
+	if set["ANTHROPIC_CUSTOM_HEADERS"] != "X-Gateway-Key: hexvalue" {
+		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q — значение без кавычек, это не shell", set["ANTHROPIC_CUSTOM_HEADERS"])
+	}
+	if set["ANTHROPIC_AUTH_TOKEN"] != AuthTokenPlaceholder {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, ожидался плейсхолдер", set["ANTHROPIC_AUTH_TOKEN"])
+	}
+}
+
 func TestRenderБезTLSПечатаетHTTP(t *testing.T) {
 	cfg := &config.Config{Mode: config.ModeOAuth, Listen: "127.0.0.1:9443", TLS: config.TLSNone}
 	got := Render(cfg, "hexvalue")

@@ -29,6 +29,14 @@ const (
 // Run запускает шлюз и возвращает управление, когда ctx отменён
 // или один из слушателей упал.
 func Run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+	return RunReady(ctx, cfg, log, nil)
+}
+
+// RunReady — то же, что Run, но зовёт ready с фактическим адресом основного
+// слушателя, как только тот занят. Нужен тому, кто поднимает шлюз в своём
+// процессе и должен знать порт (например, при --listen 127.0.0.1:0) и момент,
+// с которого соединения уже принимаются. nil — не уведомлять.
+func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready func(net.Addr)) error {
 	provider, err := tlsconf.New(cfg, log)
 	if err != nil {
 		return err
@@ -89,8 +97,15 @@ func Run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		}()
 	}
 
+	// Все слушатели заняты, отказов на старте больше не будет — можно
+	// сообщать адрес. Сокет уже принимает соединения в очередь, Serve ниже
+	// лишь начинает их разбирать.
+	if ready != nil {
+		ready(ln.Addr())
+	}
+
 	log.Info("шлюз запущен",
-		"listen", cfg.Listen,
+		"listen", ln.Addr().String(),
 		"mode", string(cfg.Mode),
 		"domain", cfg.Domain,
 		"upstream", cfg.Upstream.String(),

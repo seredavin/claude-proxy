@@ -50,7 +50,8 @@ sudo ./claude-proxy install \
 
 Другие сценарии — внутренний CA, самоподписанный сертификат, готовые PEM от
 certbot, цепочка из нескольких шлюзов, локальное звено без TLS на машине с
-Claude Code, запуск в контейнере — в [docs/advanced.md](docs/advanced.md).
+Claude Code (`claude-proxy local` поднимает его и запускает `claude` одной
+командой), запуск в контейнере — в [docs/advanced.md](docs/advanced.md).
 
 ## Получение токена подписки
 
