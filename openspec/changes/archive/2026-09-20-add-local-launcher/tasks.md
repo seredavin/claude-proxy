@@ -97,5 +97,5 @@
 
 - [x] 6.1 `make check` зелёный (gofmt, vet, тесты); `go vet` не ругается
   на `SysProcAttr`/сигналы под darwin и linux
-- [ ] 6.2 Перебаза на `main` после мержа `add-plain-listener`; PR в `main`,
+- [x] 6.2 Перебаза на `main` после мержа `add-plain-listener`; PR в `main`,
   сообщение коммита на русском
