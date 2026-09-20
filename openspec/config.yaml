@@ -34,7 +34,8 @@ context: |
   - После мержа ветка удаляется; долгоживущих develop/release-веток нет.
   - Релиз — тег vX.Y.Z на коммите main; тег запускает workflow release
     (сборка бинарей под linux/darwin, amd64/arm64).
-  - Одно изменение OpenSpec = одна ветка = один PR.
+  - Одно изменение OpenSpec = одна ветка = один PR. Изменение архивируется
+    в той же ветке до мержа: код, спеки и архив приезжают в main одним PR.
 
 # Project context (optional)
 # This is shown to AI when creating artifacts.
@@ -64,7 +65,8 @@ operations:
       - Коммиты на русском, без упоминания AI-ассистентов.
   archive:
     guidance:
-      - Архивировать только после мержа PR в main и зелёного CI.
+      - Архивировать в фича-ветке после того, как код проверен (make check,
+        при необходимости RC), до мержа — архив входит в тот же PR.
       - После мержа удалить ветку изменения.
 
 # Per-operation guidance (optional)
