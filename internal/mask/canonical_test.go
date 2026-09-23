@@ -53,3 +53,20 @@ func TestIPv6ДругаяЗаписьНаХодуМодели(t *testing.T) {
 		}
 	}
 }
+
+func TestMappedДругаяЗаписьНаХодуМодели(t *testing.T) {
+	for name, s := range sessionsWithAndWithoutKey(t, "") {
+		sur, _ := maskString(t, s, "::ffff:c0a8:0105")
+		body := `{"messages":[{"role":"assistant","content":"addr ::FFFF:C0A8:0105 and ::ffff:192.168.1.5"}]}`
+		out, _, err := s.MaskRequest([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToLower(string(out)), "c0a8:0105") || strings.Contains(string(out), "192.168.1.5") {
+			t.Errorf("%s: адрес ушёл открытым: %s", name, out)
+		}
+		if !strings.Contains(string(out), "addr "+strings.ToUpper(sur)) {
+			t.Errorf("%s: out = %s, ожидался %s в верхнем регистре", name, out, sur)
+		}
+	}
+}

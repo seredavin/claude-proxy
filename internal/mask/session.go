@@ -118,12 +118,38 @@ func (s *Session) Size() int {
 	return len(s.forward)
 }
 
-// lookupSurrogate — суррогат для значения, если уже выдан.
-func (s *Session) lookupSurrogate(value string) (string, bool) {
+// lookupSurrogate — суррогат для значения, если уже выдан. Новых записей
+// не создаёт. Шестнадцатеричная IPv4-mapped запись, которой ещё не было в
+// таблице (::FFFF:C0A8:0105 после ::ffff:c0a8:0105), находится по
+// вложенному IPv4: иначе на ходе модели она ушла бы открытым текстом.
+func (s *Session) lookupSurrogate(value, category string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sur, ok := s.forward[value]
-	return sur, ok
+	if sur, ok := s.forward[tableKey(value, category)]; ok {
+		return sur, true
+	}
+	if category == categoryIP {
+		if a, err := netip.ParseAddr(value); err == nil && a.Is4In6() {
+			if inner, ok := s.forward[a.Unmap().String()]; ok {
+				return mappedSurrogate(value, inner), true
+			}
+		}
+	}
+	return "", false
+}
+
+// mappedSurrogate — суррогат шестнадцатеричной IPv4-mapped записи value по
+// суррогату вложенного IPv4 inner: префикс до двух последних групп и
+// регистр — как в value.
+func mappedSurrogate(value, inner string) string {
+	b := netip.MustParseAddr(inner).As4()
+	last := strings.LastIndexByte(value, ':')
+	prefix := value[:strings.LastIndexByte(value[:last], ':')+1]
+	format := "%s%02x%02x:%02x%02x"
+	if strings.ContainsAny(value, "ABCDEF") {
+		format = "%s%02X%02X:%02X%02X"
+	}
+	return fmt.Sprintf(format, prefix, b[0], b[1], b[2], b[3])
 }
 
 // isSurrogate — выдавала ли таблица такой суррогат.
@@ -177,14 +203,7 @@ func (s *Session) surrogateLocked(value string, m match) (sur string, err error)
 			if err != nil {
 				return "", err
 			}
-			b := netip.MustParseAddr(inner).As4()
-			last := strings.LastIndexByte(value, ':')
-			prefix := value[:strings.LastIndexByte(value[:last], ':')+1]
-			format := "%s%02x%02x:%02x%02x"
-			if strings.ContainsAny(value, "ABCDEF") {
-				format = "%s%02X%02X:%02X%02X"
-			}
-			sur = fmt.Sprintf(format, prefix, b[0], b[1], b[2], b[3])
+			sur = mappedSurrogate(value, inner)
 			s.record(key, value, sur, m)
 			return sur, nil
 		}

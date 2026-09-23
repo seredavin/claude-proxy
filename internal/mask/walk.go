@@ -218,7 +218,7 @@ func (s *Session) maskText(text string, create bool, st *Stats) (string, error) 
 				}
 			} else {
 				var ok bool
-				if sur, ok = s.lookupSurrogate(tableKey(value, m.category)); !ok {
+				if sur, ok = s.lookupSurrogate(value, m.category); !ok {
 					continue
 				}
 			}
