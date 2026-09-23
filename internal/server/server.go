@@ -49,9 +49,13 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 	// состояние и логгер.
 	var masker *mask.Registry
 	if cfg.Mask != nil {
-		masker = mask.NewRegistry(cfg.Mask, mask.Options{Debug: cfg.MaskDebug, Logger: log})
-		log.Info("маскирование включено", "rules", cfg.MaskRules, "summary", cfg.Mask.Summary(),
-			"on_error", string(cfg.MaskOnError))
+		masker = mask.NewRegistry(cfg.Mask, mask.Options{Debug: cfg.MaskDebug, Logger: log, Key: cfg.MaskKey})
+		attrs := []any{"rules", cfg.MaskRules, "summary", cfg.Mask.Summary(), "on_error", string(cfg.MaskOnError),
+			"keyed", cfg.MaskKey != nil}
+		if cfg.MaskKey != nil {
+			attrs = append(attrs, "fingerprint", cfg.MaskKey.Fingerprint())
+		}
+		log.Info("маскирование включено", attrs...)
 		if cfg.MaskDebug {
 			log.Warn("включён --mask-debug: настоящие значения IP, хостов и секретов пишутся в лог открытым текстом")
 		}

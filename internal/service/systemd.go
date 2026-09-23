@@ -81,6 +81,13 @@ func Install(opts InstallOptions) error {
 			return err
 		}
 	}
+	// Ключ уже проверен при разборе конфигурации (формат и права); здесь —
+	// что сервисный пользователь его прочитает.
+	if opts.Resolved.MaskKeyFile != "" {
+		if err := checkMaskKeyReadable(opts.Resolved.MaskKeyFile, runAs); err != nil {
+			return err
+		}
+	}
 
 	if err := writeEnvFile(opts.Raw, out); err != nil {
 		return err
@@ -329,6 +336,7 @@ func envLines(raw config.Raw) []string {
 		{"CLAUDE_PROXY_MASK_RULES", raw.MaskRules},
 		{"CLAUDE_PROXY_MASK_ON_ERROR", raw.MaskOnError},
 		{"CLAUDE_PROXY_MASK_DEBUG", raw.MaskDebug},
+		{"CLAUDE_PROXY_MASK_KEY_FILE", raw.MaskKeyFile},
 		{"CLAUDE_PROXY_TRACE_DIR", raw.TraceDir},
 	}
 
@@ -473,6 +481,27 @@ func rulesReadableBy(path string, uid, gid int, runAs string) error {
 		return nil
 	}
 	return fmt.Errorf("пользователь %s не может прочитать файл правил %s\n    выдайте доступ (setfacl -m u:%s:r %s) или ставьте с --service-user root",
+		runAs, path, runAs, path)
+}
+
+// checkMaskKeyReadable отказывает, если сервисный пользователь не прочитает
+// ключ маскирования.
+func checkMaskKeyReadable(path, runAs string) error {
+	uid, gid, err := lookupIDs(runAs)
+	if err != nil {
+		return nil
+	}
+	return maskKeyReadableBy(path, uid, gid, runAs)
+}
+
+// maskKeyReadableBy — в отличие от файла правил подсказка не setfacl: ACL
+// поднимает групповые биты режима, и ключ перестанет проходить проверку
+// прав. Файл передаётся сервисному пользователю во владение.
+func maskKeyReadableBy(path string, uid, gid int, runAs string) error {
+	if readableBy(path, uid, gid) {
+		return nil
+	}
+	return fmt.Errorf("пользователь %s не может прочитать ключ маскирования %s\n    передайте файл сервису: chown %s %s (права оставьте 600) или ставьте с --service-user root",
 		runAs, path, runAs, path)
 }
 

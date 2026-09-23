@@ -3,6 +3,7 @@ package mask
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -17,6 +18,9 @@ type Options struct {
 	// суррогатом. Это настоящие секреты открытым текстом.
 	Debug  bool
 	Logger *slog.Logger
+	// Key — ключ маскирования: суррогаты IP и хостов вычисляются из
+	// значения и ключа. nil — суррогаты случайные.
+	Key *Key
 }
 
 // Registry — таблицы всех меток. Одна на процесс.
@@ -37,7 +41,7 @@ func NewRegistry(rules *Rules, opts Options) *Registry {
 	return &Registry{
 		rules:    rules,
 		opts:     opts,
-		scanner:  surrogateScanner(rules.regexNames()),
+		scanner:  surrogateScanner(rules.regexNames(), opts.Key != nil),
 		sessions: map[string]*Session{},
 	}
 }
@@ -56,6 +60,7 @@ func (r *Registry) Session(label string) *Session {
 			rules:       r.rules,
 			scanner:     r.scanner,
 			debug:       r.opts.Debug,
+			key:         r.opts.Key,
 			log:         r.opts.Logger,
 			forward:     map[string]string{},
 			reverse:     map[string]string{},
@@ -81,6 +86,7 @@ type Session struct {
 	scanner *regexp.Regexp
 	debug   bool
 	log     *slog.Logger
+	key     *Key
 
 	mu       sync.Mutex
 	forward  map[string]string // значение → суррогат
@@ -143,6 +149,18 @@ func (s *Session) surrogateFor(value string, m match) (sur string, err error) {
 		return sur, nil
 	}
 
+	if s.key != nil && (m.category == categoryIP || m.category == categoryHost) {
+		sur, err = s.keyedSurrogate(key, value, m)
+		if err == nil {
+			return sur, nil
+		}
+		if !errors.Is(err, errHostUnkeyable) {
+			return "", err
+		}
+		// Имя не шифруется (слишком длинное) — случайный host-N.example.
+		s.log.Warn("имя хоста не помещается в суррогат по ключу, выдан случайный", "token", s.label, "length", len(value))
+	}
+
 	// Суррогат не должен совпасть ни с выданным ранее, ни с реальным
 	// значением из таблицы: второе сделало бы обратную подстановку
 	// неоднозначной. Для IP это отдельный генератор со своим перебором.
@@ -170,23 +188,66 @@ func (s *Session) surrogateFor(value string, m match) (sur string, err error) {
 		if _, real := s.forward[sur]; real {
 			continue
 		}
-		s.forward[key] = sur
-		s.reverse[sur] = value
-		if m.regexName != "" {
-			s.regexValues[value] = match{category: m.category, regexName: m.regexName}
-		}
-		for i := 1; i < len(sur); i++ {
-			s.prefixes[sur[:i]] = struct{}{}
-		}
-		if len(sur) > s.maxLen {
-			s.maxLen = len(sur)
-		}
-		if s.debug {
-			s.log.Info("mask", "token", s.label, "category", m.category, "from", value, "to", sur)
-		}
+		s.record(key, value, sur, m)
 		return sur, nil
 	}
 	return "", fmt.Errorf("не удалось подобрать уникальный суррогат для категории %s", m.category)
+}
+
+// keyedSurrogate вычисляет суррогат IP или хоста по ключу. Проверки
+// «суррогат совпал с реальным значением» здесь нет: перестановка
+// биективна, а модель видит только суррогаты, так что суррогат в ответе
+// однозначен. Вызывается под s.mu.
+func (s *Session) keyedSurrogate(key, value string, m match) (string, error) {
+	var sur string
+	var err error
+	if m.category == categoryIP {
+		sur, err = s.keyedIP(value)
+	} else {
+		sur, err = s.key.maskHost(key)
+	}
+	if err != nil {
+		return "", err
+	}
+	// Та же сущность в другой записи (fd00::1 и fd00:0::1) даёт тот же
+	// суррогат: обратная запись остаётся за первой формой.
+	if prev, taken := s.reverse[sur]; taken {
+		if !sameValue(prev, value, m.category) {
+			return "", fmt.Errorf("суррогат по ключу совпал у разных значений категории %s", m.category)
+		}
+		s.forward[key] = sur
+		return sur, nil
+	}
+	s.record(key, value, sur, m)
+	return sur, nil
+}
+
+// sameValue — одно ли это значение в разных записях.
+func sameValue(a, b, category string) bool {
+	if category == categoryIP {
+		x, errX := netip.ParseAddr(a)
+		y, errY := netip.ParseAddr(b)
+		return errX == nil && errY == nil && x == y
+	}
+	return strings.EqualFold(a, b)
+}
+
+// record заносит пару в таблицу. Вызывается под s.mu.
+func (s *Session) record(key, value, sur string, m match) {
+	s.forward[key] = sur
+	s.reverse[sur] = value
+	if m.regexName != "" {
+		s.regexValues[value] = match{category: m.category, regexName: m.regexName}
+	}
+	for i := 1; i < len(sur); i++ {
+		s.prefixes[sur[:i]] = struct{}{}
+	}
+	if len(sur) > s.maxLen {
+		s.maxLen = len(sur)
+	}
+	if s.debug {
+		s.log.Info("mask", "token", s.label, "category", m.category, "from", value, "to", sur)
+	}
 }
 
 func (s *Session) next() int {
@@ -356,19 +417,24 @@ func randByte() byte {
 
 // surrogateScanner — regex всех форм суррогатов. Совпадение — только
 // кандидат: подставляется лишь то, что есть в обратной таблице.
-func surrogateScanner(regexNames []string) *regexp.Regexp {
+func surrogateScanner(regexNames []string, keyed bool) *regexp.Regexp {
 	names := append([]string{"SECRET"}, regexNames...)
 	for i, n := range names {
 		names[i] = regexp.QuoteMeta(n)
 	}
-	pattern := strings.Join([]string{
+	forms := []string{
 		`-----BEGIN [A-Z ]*PRIVATE KEY-----MASKED\d{4,}-----END [A-Z ]*PRIVATE KEY-----`,
 		`(?:sk-ant-[a-z0-9]+-|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|AKIA|ASIA|xox[abpr]-|eyJ\.)MASKED\d{4,}`,
 		`(?:` + strings.Join(names, "|") + `)\d{4,}`,
 		`host-\d+\.example`,
 		`\d{1,3}(?:\.\d{1,3}){3}`,
 		`[0-9A-Fa-f:]*:[0-9A-Fa-f:]*`,
-	}, "|")
+	}
+	if keyed {
+		// Суррогат хоста по ключу: base32 строчными, разрезанный на метки.
+		forms = append(forms, `host-[a-z2-7]+(?:\.[a-z2-7]+)*\.example`)
+	}
+	pattern := strings.Join(forms, "|")
 	re := regexp.MustCompile(pattern)
 	re.Longest()
 	return re
