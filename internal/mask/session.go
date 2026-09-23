@@ -142,13 +142,26 @@ func (s *Session) surrogateFor(value string, m match) (string, error) {
 	return s.surrogateLocked(value, m)
 }
 
+// tableKey — ключ таблицы: одно значение в разных записях даёт один ключ.
+// Имена хостов регистронезависимы (Corp.Local и corp.local — одно), IP
+// сравниваются как адреса (FD00::1 и fd00:0::1 — один). IPv4-mapped
+// остаётся как есть: его каноническая запись точечная, и суррогат второй
+// записи взял бы формат первой; вложенный IPv4 и так даёт им один суррогат.
+func tableKey(value, category string) string {
+	switch category {
+	case categoryHost:
+		return strings.ToLower(value)
+	case categoryIP:
+		if a, err := netip.ParseAddr(value); err == nil && !a.Is4In6() {
+			return a.String()
+		}
+	}
+	return value
+}
+
 // surrogateLocked — surrogateFor под уже взятым s.mu.
 func (s *Session) surrogateLocked(value string, m match) (sur string, err error) {
-	key := value
-	if m.category == categoryHost {
-		// Имена хостов регистронезависимы: Corp.Local и corp.local — одно.
-		key = strings.ToLower(value)
-	}
+	key := tableKey(value, m.category)
 	if sur, ok := s.forward[key]; ok {
 		return sur, nil
 	}

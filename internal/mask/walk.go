@@ -217,12 +217,8 @@ func (s *Session) maskText(text string, create bool, st *Stats) (string, error) 
 					return "", err
 				}
 			} else {
-				key := value
-				if m.category == categoryHost {
-					key = strings.ToLower(value)
-				}
 				var ok bool
-				if sur, ok = s.lookupSurrogate(key); !ok {
+				if sur, ok = s.lookupSurrogate(tableKey(value, m.category)); !ok {
 					continue
 				}
 			}
