@@ -18,6 +18,7 @@ import (
 	"github.com/seredavin/claude-proxy/internal/auth"
 	"github.com/seredavin/claude-proxy/internal/clientenv"
 	"github.com/seredavin/claude-proxy/internal/config"
+	"github.com/seredavin/claude-proxy/internal/mask"
 	"github.com/seredavin/claude-proxy/internal/server"
 	"github.com/seredavin/claude-proxy/internal/service"
 	"github.com/seredavin/claude-proxy/internal/tlsconf"
@@ -50,6 +51,8 @@ func dispatch(args []string) error {
 		return cmdUninstall(args)
 	case "gen-token":
 		return cmdGenToken(args)
+	case "gen-mask-key":
+		return cmdGenMaskKey(args)
 	case "gen-cert":
 		return cmdGenCert(args)
 	case "client-env":
@@ -78,6 +81,7 @@ func usage(w io.Writer) {
   install       Разложить бинарь, конфигурацию и systemd-юнит, запустить сервис.
   uninstall     Остановить сервис и убрать юнит. С --purge — снести всё.
   gen-token     Сгенерировать токен шлюза.
+  gen-mask-key  Сгенерировать ключ маскирования (для --mask-key-file).
   gen-cert      Выпустить самоподписанный сертификат.
   client-env    Напечатать переменные окружения для клиентской машины.
   version       Показать версию.
@@ -197,6 +201,21 @@ func cmdGenToken(args []string) error {
 		return nil
 	}
 	fmt.Printf("%s:%s\n", *label, token)
+	return nil
+}
+
+// cmdGenMaskKey печатает новый ключ маскирования. Файл не пишется: права
+// на него оператор выставляет сам (chmod 600).
+func cmdGenMaskKey(args []string) error {
+	fs := flag.NewFlagSet("gen-mask-key", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	key, err := mask.GenerateKey()
+	if err != nil {
+		return err
+	}
+	fmt.Println(key)
 	return nil
 }
 

@@ -102,6 +102,10 @@ type Config struct {
 	MaskOnError MaskPolicy
 	// MaskDebug — писать пары «значение → суррогат» в лог. Секреты в логе.
 	MaskDebug bool
+	// MaskKeyFile — файл ключа маскирования; пусто — суррогаты случайные.
+	// MaskKey — загруженный ключ.
+	MaskKeyFile string
+	MaskKey     *mask.Key
 
 	// TraceDir — каталог трассировки тел запросов и ответов; пусто —
 	// трассировка выключена.
@@ -132,6 +136,7 @@ type Raw struct {
 	// оператор явно — без файла правил они бессмысленны.
 	MaskOnError string
 	MaskDebug   string
+	MaskKeyFile string
 	TraceDir    string
 }
 
@@ -166,6 +171,7 @@ func (r *Raw) bindings() []binding {
 		{&r.MaskRules, "mask-rules", []string{"CLAUDE_PROXY_MASK_RULES"}},
 		{&r.MaskOnError, "mask-on-error", []string{"CLAUDE_PROXY_MASK_ON_ERROR"}},
 		{&r.MaskDebug, "mask-debug", []string{"CLAUDE_PROXY_MASK_DEBUG"}},
+		{&r.MaskKeyFile, "mask-key-file", []string{"CLAUDE_PROXY_MASK_KEY_FILE"}},
 		{&r.TraceDir, "trace-dir", []string{"CLAUDE_PROXY_TRACE_DIR"}},
 	}
 }
@@ -226,6 +232,8 @@ func Bind(fs *flag.FlagSet) *Raw {
 		"тело не удалось замаскировать: closed — отказ клиенту (по умолчанию), open — отправить как есть")
 	fs.BoolFunc("mask-debug", "писать в лог каждую подстановку с настоящим значением (секреты в логе!)",
 		func(v string) error { r.MaskDebug = v; return nil })
+	fs.StringVar(&r.MaskKeyFile, "mask-key-file", d.MaskKeyFile,
+		"файл ключа маскирования (claude-proxy gen-mask-key): суррогаты IP и хостов одинаковы во всех процессах с этим ключом")
 	fs.StringVar(&r.TraceDir, "trace-dir", d.TraceDir,
 		"каталог трассировки: тела запросов и ответов по файлам на запрос (режим отладки, тела с секретами!)")
 
@@ -283,6 +291,7 @@ func Resolve(r Raw) (*Config, error) {
 		LogFormat:     strings.TrimSpace(r.LogFormat),
 		MaskRules:     strings.TrimSpace(r.MaskRules),
 		MaskOnError:   MaskClosed,
+		MaskKeyFile:   strings.TrimSpace(r.MaskKeyFile),
 		TraceDir:      strings.TrimSpace(r.TraceDir),
 	}
 
@@ -307,6 +316,9 @@ func Resolve(r Raw) (*Config, error) {
 		}
 		if c.MaskDebug {
 			return nil, fmt.Errorf("--mask-debug имеет смысл только вместе с --mask-rules")
+		}
+		if c.MaskKeyFile != "" {
+			return nil, fmt.Errorf("--mask-key-file действует только вместе с --mask-rules")
 		}
 	}
 
@@ -372,6 +384,13 @@ func Resolve(r Raw) (*Config, error) {
 			return nil, err
 		}
 		c.Mask = rules
+	}
+	if c.MaskKeyFile != "" {
+		key, err := mask.LoadKeyFile(c.MaskKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		c.MaskKey = key
 	}
 	return c, nil
 }

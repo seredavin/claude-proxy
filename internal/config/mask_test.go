@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seredavin/claude-proxy/internal/mask"
 )
 
 // maskBase — минимальный набор флагов, с которым Resolve проходит.
@@ -96,5 +98,58 @@ func TestTraceDirИзФлагаИПеременной(t *testing.T) {
 	cfg, _, err = load(t, maskBase, nil)
 	if err != nil || cfg.TraceDir != "" {
 		t.Errorf("по умолчанию выключено: %q err = %v", cfg.TraceDir, err)
+	}
+}
+
+func writeKey(t *testing.T, perm os.FileMode) string {
+	t.Helper()
+	key, err := mask.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "mask.key")
+	if err := os.WriteFile(path, []byte(key+"\n"), perm); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, perm); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestКлючМаскированияИзФлагаИПеременной(t *testing.T) {
+	rules := writeRules(t, "")
+	key := writeKey(t, 0o600)
+	cfg, _, err := load(t, append(append([]string{}, maskBase...), "--mask-rules", rules, "--mask-key-file", key), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaskKey == nil || cfg.MaskKeyFile != key {
+		t.Errorf("ключ из флага не загружен: %+v", cfg)
+	}
+	cfg, _, err = load(t, append(append([]string{}, maskBase...), "--mask-rules", rules),
+		map[string]string{"CLAUDE_PROXY_MASK_KEY_FILE": key})
+	if err != nil || cfg.MaskKey == nil {
+		t.Errorf("ключ из переменной не загружен: %v", err)
+	}
+}
+
+func TestКлючМаскированияОшибки(t *testing.T) {
+	rules := writeRules(t, "")
+	open := writeKey(t, 0o644)
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"ключ без правил", []string{"--mask-key-file", writeKey(t, 0o600)}, "только вместе с --mask-rules"},
+		{"права 644", []string{"--mask-rules", rules, "--mask-key-file", open}, "chmod 600 " + open},
+		{"нет файла", []string{"--mask-rules", rules, "--mask-key-file", "/nonexistent/mask.key"}, "ключа маскирования"},
+	}
+	for _, tt := range tests {
+		_, _, err := load(t, append(append([]string{}, maskBase...), tt.args...), nil)
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: err = %v, ожидалось %q", tt.name, err, tt.want)
+		}
 	}
 }

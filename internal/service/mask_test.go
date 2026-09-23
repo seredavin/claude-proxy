@@ -58,3 +58,31 @@ func TestEnvLinesTraceDir(t *testing.T) {
 		t.Error("каталог не попал в файл")
 	}
 }
+
+func TestEnvLinesКлючМаскирования(t *testing.T) {
+	raw := config.Defaults()
+	raw.Tokens = "default:abc"
+	if strings.Contains(strings.Join(envLines(raw), "\n"), "CLAUDE_PROXY_MASK_KEY_FILE") {
+		t.Error("без ключа переменной быть не должно")
+	}
+	raw.MaskRules = "/etc/claude-proxy/mask.rules"
+	raw.MaskKeyFile = "/etc/claude-proxy/mask.key"
+	if !strings.Contains(strings.Join(envLines(raw), "\n"), `CLAUDE_PROXY_MASK_KEY_FILE="/etc/claude-proxy/mask.key"`) {
+		t.Error("ключ не попал в файл")
+	}
+}
+
+func TestКлючМаскированияНедоступенСервисномуПользователю(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mask.key")
+	if err := os.WriteFile(path, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Чужой uid при файле 600 — как claude-proxy при ключе root:600.
+	err := maskKeyReadableBy(path, os.Getuid()+1, os.Getgid()+1, "claude-proxy")
+	if err == nil || !strings.Contains(err.Error(), "chown claude-proxy "+path) || strings.Contains(err.Error(), "setfacl") {
+		t.Errorf("err = %v", err)
+	}
+	if err := maskKeyReadableBy(path, os.Getuid(), os.Getgid(), "me"); err != nil {
+		t.Errorf("владелец должен читать: %v", err)
+	}
+}
