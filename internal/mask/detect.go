@@ -74,8 +74,10 @@ var (
 	ipv4Candidate = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 	// IPv6 распознаётся не грамматикой, а кандидатом «hex и двоеточия» с
 	// последующим netip.ParseAddr: грамматика v6 в regexp нечитаема, а
-	// ParseAddr отсекает время 12:30:45 и MAC-адреса сам.
-	ipv6Candidate = regexp.MustCompile(`[0-9A-Fa-f:]*:[0-9A-Fa-f:]*(?::\d{1,3}(?:\.\d{1,3}){3})?`)
+	// ParseAddr отсекает время 12:30:45 и MAC-адреса сам. Точечный
+	// IPv4-хвост (::ffff:10.0.0.1) идёт сразу за последним двоеточием и
+	// проверяется первым: иначе жадный класс обрывает адрес на точке.
+	ipv6Candidate = regexp.MustCompile(`[0-9A-Fa-f:]*:(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:]*)`)
 
 	privateNets = []netip.Prefix{
 		netip.MustParsePrefix("10.0.0.0/8"),
@@ -95,7 +97,10 @@ func isPrivate(a netip.Addr) bool {
 }
 
 // maskable отвечает, подлежит ли адрес маскированию в данном режиме.
+// IPv4-mapped адрес решается по вложенному IPv4: ::ffff:127.0.0.1 —
+// loopback, ::ffff:192.168.1.5 — приватный.
 func maskable(a netip.Addr, mode IPMode) bool {
+	a = a.Unmap()
 	if a.IsLoopback() || a.IsUnspecified() {
 		return false
 	}
@@ -134,6 +139,12 @@ func detectIPs(text string, mode IPMode) []match {
 		}
 		a, err := netip.ParseAddr(text[start:end])
 		if err != nil || !a.Is6() || !maskable(a, mode) {
+			continue
+		}
+		// ::ffff:a.b.c.d — маскируется только IPv4-хвост, его уже нашёл
+		// детектор IPv4: так вложенный адрес получает тот же суррогат, что
+		// и в обычной записи, а префикс ::ffff: остаётся текстом.
+		if a.Is4In6() && strings.Contains(text[start:end], ".") {
 			continue
 		}
 		ms = append(ms, match{start: start, end: end, category: categoryIP})
