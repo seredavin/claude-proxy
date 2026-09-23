@@ -141,10 +141,17 @@ func detectIPs(text string, mode IPMode) []match {
 		if err != nil || !a.Is6() || !maskable(a, mode) {
 			continue
 		}
-		// ::ffff:a.b.c.d — маскируется только IPv4-хвост, его уже нашёл
+		// ::ffff:a.b.c.d — маскируется только IPv4-хвост, его находит
 		// детектор IPv4: так вложенный адрес получает тот же суррогат, что
-		// и в обычной записи, а префикс ::ffff: остаётся текстом.
+		// и в обычной записи, а префикс ::ffff: остаётся текстом. Исключение
+		// — «.цифра» сразу за хвостом: детектор IPv4 принял бы его за номер
+		// версии и пропустил, а с префиксом ::ffff: это адрес, и хвост
+		// маскируется здесь.
 		if a.Is4In6() && strings.Contains(text[start:end], ".") {
+			if end+1 < len(text) && text[end] == '.' && isDigit(text[end+1]) {
+				tail := strings.LastIndexByte(text[start:end], ':') + start + 1
+				ms = append(ms, match{start: tail, end: end, category: categoryIP})
+			}
 			continue
 		}
 		ms = append(ms, match{start: start, end: end, category: categoryIP})

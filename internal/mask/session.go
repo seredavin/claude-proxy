@@ -155,8 +155,9 @@ func (s *Session) surrogateLocked(value string, m match) (sur string, err error)
 
 	// ::ffff:XXXX:XXXX — суррогат вложенного IPv4 в той же
 	// шестнадцатеричной записи: netip напечатал бы его точечно, и обратный
-	// сканер IPv6 такую форму не узнал бы. Точечную запись детектор сюда не
-	// передаёт — она маскируется как обычный IPv4.
+	// сканер IPv6 такую форму не узнал бы. Префикс до двух последних групп
+	// (::ffff:, 0:0:0:0:0:FFFF:) и регистр сохраняются. Точечную запись
+	// детектор сюда не передаёт — она маскируется как обычный IPv4.
 	if m.category == categoryIP {
 		if a, perr := netip.ParseAddr(value); perr == nil && a.Is4In6() {
 			inner, err := s.surrogateLocked(a.Unmap().String(), m)
@@ -164,7 +165,13 @@ func (s *Session) surrogateLocked(value string, m match) (sur string, err error)
 				return "", err
 			}
 			b := netip.MustParseAddr(inner).As4()
-			sur = fmt.Sprintf("::ffff:%02x%02x:%02x%02x", b[0], b[1], b[2], b[3])
+			last := strings.LastIndexByte(value, ':')
+			prefix := value[:strings.LastIndexByte(value[:last], ':')+1]
+			format := "%s%02x%02x:%02x%02x"
+			if strings.ContainsAny(value, "ABCDEF") {
+				format = "%s%02X%02X:%02X%02X"
+			}
+			sur = fmt.Sprintf(format, prefix, b[0], b[1], b[2], b[3])
 			s.record(key, value, sur, m)
 			return sur, nil
 		}

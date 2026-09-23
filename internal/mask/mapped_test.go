@@ -96,3 +96,36 @@ func TestNAT64ИCompatibleЦеликом(t *testing.T) {
 		}
 	}
 }
+
+func TestMappedПередТочкойСЦифройМаскируется(t *testing.T) {
+	for name, s := range sessionsWithAndWithoutKey(t, "") {
+		out, st := maskString(t, s, "::ffff:10.0.0.1.5")
+		if strings.Contains(out, "10.0.0.1") || st.Masked[categoryIP] != 1 ||
+			!regexp.MustCompile(`^::ffff:10\.\d+\.\d+\.\d+\.5$`).MatchString(out) {
+			t.Errorf("%s: %q %v", name, out, st.Masked)
+		}
+	}
+	// Без префикса ::ffff: — по-прежнему номер версии, не адрес.
+	if out, _ := maskString(t, newSession(t, ""), "10.0.0.1.5"); out != "10.0.0.1.5" {
+		t.Errorf("версия замаскирована: %q", out)
+	}
+}
+
+func TestMappedШестнадцатеричнаяЗаписьСохраняетПрефиксИРегистр(t *testing.T) {
+	for name, s := range sessionsWithAndWithoutKey(t, "") {
+		for _, tc := range []struct{ in, re string }{
+			{"::FFFF:C0A8:0105", `^::FFFF:[0-9A-F]{4}:[0-9A-F]{4}$`},
+			{"0:0:0:0:0:ffff:c0a8:0106", `^0:0:0:0:0:ffff:[0-9a-f]{4}:[0-9a-f]{4}$`},
+		} {
+			out, _ := maskString(t, s, tc.in)
+			if !regexp.MustCompile(tc.re).MatchString(out) || strings.EqualFold(out, tc.in) {
+				t.Errorf("%s: %q → %q", name, tc.in, out)
+				continue
+			}
+			got, _, _ := s.UnmaskJSON([]byte(`{"text":"` + out + `"}`))
+			if !strings.Contains(string(got), tc.in) {
+				t.Errorf("%s: обратная подстановка %q: %s", name, out, got)
+			}
+		}
+	}
+}
