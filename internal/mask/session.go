@@ -136,10 +136,14 @@ func (s *Session) isSurrogate(value string) bool {
 
 // surrogateFor возвращает суррогат для совпадения, создавая запись при
 // первом обращении.
-func (s *Session) surrogateFor(value string, m match) (sur string, err error) {
+func (s *Session) surrogateFor(value string, m match) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.surrogateLocked(value, m)
+}
 
+// surrogateLocked — surrogateFor под уже взятым s.mu.
+func (s *Session) surrogateLocked(value string, m match) (sur string, err error) {
 	key := value
 	if m.category == categoryHost {
 		// Имена хостов регистронезависимы: Corp.Local и corp.local — одно.
@@ -147,6 +151,30 @@ func (s *Session) surrogateFor(value string, m match) (sur string, err error) {
 	}
 	if sur, ok := s.forward[key]; ok {
 		return sur, nil
+	}
+
+	// ::ffff:XXXX:XXXX — суррогат вложенного IPv4 в той же
+	// шестнадцатеричной записи: netip напечатал бы его точечно, и обратный
+	// сканер IPv6 такую форму не узнал бы. Префикс до двух последних групп
+	// (::ffff:, 0:0:0:0:0:FFFF:) и регистр сохраняются. Точечную запись
+	// детектор сюда не передаёт — она маскируется как обычный IPv4.
+	if m.category == categoryIP {
+		if a, perr := netip.ParseAddr(value); perr == nil && a.Is4In6() {
+			inner, err := s.surrogateLocked(a.Unmap().String(), m)
+			if err != nil {
+				return "", err
+			}
+			b := netip.MustParseAddr(inner).As4()
+			last := strings.LastIndexByte(value, ':')
+			prefix := value[:strings.LastIndexByte(value[:last], ':')+1]
+			format := "%s%02x%02x:%02x%02x"
+			if strings.ContainsAny(value, "ABCDEF") {
+				format = "%s%02X%02X:%02X%02X"
+			}
+			sur = fmt.Sprintf(format, prefix, b[0], b[1], b[2], b[3])
+			s.record(key, value, sur, m)
+			return sur, nil
+		}
 	}
 
 	if s.key != nil && (m.category == categoryIP || m.category == categoryHost) {
