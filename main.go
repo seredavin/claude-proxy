@@ -53,6 +53,8 @@ func dispatch(args []string) error {
 		return cmdGenToken(args)
 	case "gen-mask-key":
 		return cmdGenMaskKey(args)
+	case "unmask":
+		return cmdUnmask(args, os.Getenv, os.Stdin, os.Stdout, os.Stderr)
 	case "gen-cert":
 		return cmdGenCert(args)
 	case "client-env":
@@ -82,6 +84,7 @@ func usage(w io.Writer) {
   uninstall     Остановить сервис и убрать юнит. С --purge — снести всё.
   gen-token     Сгенерировать токен шлюза.
   gen-mask-key  Сгенерировать ключ маскирования (для --mask-key-file).
+  unmask        Расшифровать метки <<m:…>> из stdin ключом маскирования.
   gen-cert      Выпустить самоподписанный сертификат.
   client-env    Напечатать переменные окружения для клиентской машины.
   version       Показать версию.
@@ -216,6 +219,40 @@ func cmdGenMaskKey(args []string) error {
 		return err
 	}
 	fmt.Println(key)
+	return nil
+}
+
+// cmdUnmask заменяет метки режима --mask-tags в тексте из stdin исходными
+// значениями. Метки чужого ключа и испорченные остаются как есть; их число
+// уходит в stderr, чтобы его не перепутали с текстом.
+func cmdUnmask(args []string, getenv config.Getenv, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("unmask", flag.ExitOnError)
+	keyFile := fs.String("mask-key-file", "", "файл ключа маскирования; по умолчанию — из CLAUDE_PROXY_MASK_KEY_FILE")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	path := strings.TrimSpace(*keyFile)
+	if path == "" {
+		path = strings.TrimSpace(getenv("CLAUDE_PROXY_MASK_KEY_FILE"))
+	}
+	if path == "" {
+		return fmt.Errorf("укажите --mask-key-file или CLAUDE_PROXY_MASK_KEY_FILE")
+	}
+	key, err := mask.LoadKeyFile(path)
+	if err != nil {
+		return err
+	}
+	text, err := io.ReadAll(stdin)
+	if err != nil {
+		return fmt.Errorf("чтение stdin: %w", err)
+	}
+	out, _, failed := key.RevealTags(string(text))
+	if _, err := io.WriteString(stdout, out); err != nil {
+		return err
+	}
+	if failed > 0 {
+		fmt.Fprintf(stderr, "не расшифровано меток: %d (чужой ключ или повреждены)\n", failed)
+	}
 	return nil
 }
 

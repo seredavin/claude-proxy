@@ -196,6 +196,11 @@ func (s *Session) maskText(text string, create bool, st *Stats) (string, error) 
 		if !create {
 			found = append(found, s.knownRegexValues(text)...)
 		}
+		// Метки (вставленные пользователем или прошлой проходкой) не
+		// трогаются: литерал или regex мог совпасть с куском токена.
+		if s.tags {
+			found = outsideTags(found, tagSpans(text))
+		}
 		matches, dropped := merge(found)
 		if len(matches) == 0 {
 			return text, nil

@@ -153,3 +153,29 @@ func TestКлючМаскированияОшибки(t *testing.T) {
 		}
 	}
 }
+
+func TestРежимМеток(t *testing.T) {
+	rules := writeRules(t, "")
+	key := writeKey(t, 0o600)
+	base := append(append([]string{}, maskBase...), "--mask-rules", rules, "--mask-key-file", key)
+	cfg, _, err := load(t, append(append([]string{}, base...), "--mask-tags"), nil)
+	if err != nil || !cfg.MaskTags {
+		t.Errorf("флаг: tags=%v err=%v", cfg != nil && cfg.MaskTags, err)
+	}
+	cfg, _, err = load(t, base, map[string]string{"CLAUDE_PROXY_MASK_TAGS": "true"})
+	if err != nil || !cfg.MaskTags {
+		t.Errorf("переменная: err=%v", err)
+	}
+	cfg, _, err = load(t, base, nil)
+	if err != nil || cfg.MaskTags {
+		t.Errorf("по умолчанию выключено: err=%v", err)
+	}
+	_, _, err = load(t, append(append([]string{}, maskBase...), "--mask-rules", rules, "--mask-tags"), nil)
+	if err == nil || !strings.Contains(err.Error(), "требует ключ маскирования") {
+		t.Errorf("без ключа: err = %v", err)
+	}
+	_, _, err = load(t, base, map[string]string{"CLAUDE_PROXY_MASK_TAGS": "может быть"})
+	if err == nil || !strings.Contains(err.Error(), "mask-tags") {
+		t.Errorf("не булево: err = %v", err)
+	}
+}
