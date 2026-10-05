@@ -106,7 +106,7 @@ type Config struct {
 	// MaskKey — загруженный ключ.
 	MaskKeyFile string
 	MaskKey     *mask.Key
-	// MaskTags — хосты и секреты уходят метками <<m:…>> с зашифрованным
+	// MaskTags — IP, хосты и секреты уходят метками <<m:…>> с зашифрованным
 	// ключом значением (экспериментальный режим).
 	MaskTags bool
 
@@ -239,7 +239,7 @@ func Bind(fs *flag.FlagSet) *Raw {
 		func(v string) error { r.MaskDebug = v; return nil })
 	fs.StringVar(&r.MaskKeyFile, "mask-key-file", d.MaskKeyFile,
 		"файл ключа маскирования (claude-proxy gen-mask-key): суррогаты IP и хостов одинаковы во всех процессах с этим ключом")
-	fs.BoolFunc("mask-tags", "экспериментально: хосты и секреты уходят метками <<m:категория:шифртекст>>, нужен --mask-key-file",
+	fs.BoolFunc("mask-tags", "экспериментально: IP, хосты и секреты уходят метками <<m:категория:шифртекст>>, нужен --mask-key-file",
 		func(v string) error { r.MaskTags = v; return nil })
 	fs.StringVar(&r.TraceDir, "trace-dir", d.TraceDir,
 		"каталог трассировки: тела запросов и ответов по файлам на запрос (режим отладки, тела с секретами!)")

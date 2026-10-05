@@ -124,22 +124,53 @@ func TestМеткиВместоСуррогатов(t *testing.T) {
 		}
 	}
 	tags := tagPattern.FindAllString(out, -1)
-	if len(tags) != 5 {
-		t.Fatalf("меток %d, ожидалось 5: %s", len(tags), out)
+	if len(tags) != 6 {
+		t.Fatalf("меток %d, ожидалось 6: %s", len(tags), out)
 	}
-	for _, prefix := range []string{"ssh <<m:host:", "token <<m:secret:", "pw <<m:secret:", "password=<<m:password:"} {
+	for _, prefix := range []string{"ssh <<m:host:", "token <<m:secret:", "pw <<m:secret:", "password=<<m:password:", "ip <<m:ip:"} {
 		if !strings.Contains(out, prefix) {
 			t.Errorf("нет %q: %s", prefix, out)
 		}
 	}
-	if !strings.HasSuffix(out, "\n<<m:secret:"+strings.TrimPrefix(tags[4], "<<m:secret:")) {
+	if !strings.HasSuffix(out, "\n<<m:secret:"+strings.TrimPrefix(tags[5], "<<m:secret:")) {
 		t.Errorf("PEM не заменён одной меткой: %s", out)
-	}
-	if !regexp.MustCompile(`ip 10\.\d+\.\d+\.\d+`).MatchString(out) {
-		t.Errorf("IP не суррогат по ключу: %s", out)
 	}
 	if st.Masked["host"] != 1 || st.Masked["secret"] != 3 || st.Masked["password"] != 1 || st.Masked["ip"] != 1 {
 		t.Errorf("счётчики %v", st.Masked)
+	}
+}
+
+func TestМеткиIP(t *testing.T) {
+	k := testKey(t)
+	s := newTagSession(t, "", k)
+	in := "a 10.0.0.5:22 b 10.0.1.0/24 c FD00::1 d fd00:0::1 e ::ffff:10.0.0.5 f ::FFFF:0A00:0005 g 2001:db8::7 h 127.0.0.1"
+	out, st := maskString(t, s, in)
+	v4 := k.sealTag(categoryIP, "10.0.0.5")
+	v6 := k.sealTag(categoryIP, "fd00::1")
+	want := "a " + v4 + ":22 b " + k.sealTag(categoryIP, "10.0.1.0") + "/24 c " + v6 + " d " + v6 +
+		" e ::ffff:" + v4 + " f ::FFFF:" + v4 + " g " + k.sealTag(categoryIP, "2001:db8::7") + " h 127.0.0.1"
+	if out != want {
+		t.Errorf("маскирование IP:\n%s\nожидалось\n%s", out, want)
+	}
+	if st.Masked["ip"] != 7 {
+		t.Errorf("счётчики %v", st.Masked)
+	}
+	// Метка раскрывается и в процессе без таблицы: адрес в канонической записи.
+	fresh := newTagSession(t, "", k)
+	body, _ := json.Marshal(map[string]string{"t": out})
+	res, _, err := fresh.UnmaskJSON(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct{ T string }
+	_ = json.Unmarshal(res, &v)
+	if want := "a 10.0.0.5:22 b 10.0.1.0/24 c fd00::1 d fd00::1 e ::ffff:10.0.0.5 f ::FFFF:10.0.0.5 g 2001:db8::7 h 127.0.0.1"; v.T != want {
+		t.Errorf("раскрытие = %q, ожидалось %q", v.T, want)
+	}
+	// Ход модели с раскрытым адресом перемаскируется в ту же метку.
+	again, _, err := fresh.MaskRequest([]byte(`{"messages":[{"role":"assistant","content":"ping 10.0.0.5"}]}`))
+	if err != nil || !strings.Contains(string(again), "ping "+v4) {
+		t.Errorf("ход модели = %s, %v", again, err)
 	}
 }
 

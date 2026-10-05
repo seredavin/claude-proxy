@@ -21,7 +21,7 @@ type Options struct {
 	// Key — ключ маскирования: суррогаты IP и хостов вычисляются из
 	// значения и ключа. nil — суррогаты случайные.
 	Key *Key
-	// Tags — хосты и секреты уходят метками <<m:категория:токен>> с
+	// Tags — IP, хосты и секреты уходят метками <<m:категория:токен>> с
 	// зашифрованным ключом значением. Действует только вместе с Key.
 	Tags bool
 }
@@ -145,11 +145,15 @@ func (s *Session) lookupSurrogate(value, category string) (string, bool) {
 
 // mappedSurrogate — суррогат шестнадцатеричной IPv4-mapped записи value по
 // суррогату вложенного IPv4 inner: префикс до двух последних групп и
-// регистр — как в value.
+// регистр — как в value. В режиме меток inner — метка, и она встаёт
+// вместо двух последних групп.
 func mappedSurrogate(value, inner string) string {
-	b := netip.MustParseAddr(inner).As4()
 	last := strings.LastIndexByte(value, ':')
 	prefix := value[:strings.LastIndexByte(value[:last], ':')+1]
+	if strings.HasPrefix(inner, tagOpen) {
+		return prefix + inner
+	}
+	b := netip.MustParseAddr(inner).As4()
 	format := "%s%02x%02x:%02x%02x"
 	if strings.ContainsAny(value, "ABCDEF") {
 		format = "%s%02X%02X:%02X%02X"
@@ -214,9 +218,9 @@ func (s *Session) surrogateLocked(value string, m match) (sur string, err error)
 		}
 	}
 
-	// Режим меток: хосты и секреты — метка с зашифрованным значением.
-	// Она биективна по построению, проверка коллизий не нужна.
-	if s.tags && m.category != categoryIP {
+	// Режим меток: метка с зашифрованным значением, у IP — каноническая
+	// запись адреса. Она биективна по построению, проверка коллизий не нужна.
+	if s.tags {
 		sur = s.key.sealTag(m.category, key)
 		s.record(key, value, sur, m)
 		return sur, nil
@@ -352,7 +356,7 @@ func (s *Session) openTagLocked(tag string) (string, bool) {
 		return "", false
 	}
 	m := match{category: category}
-	if category != categoryHost && category != categorySecret {
+	if category != categoryHost && category != categorySecret && category != categoryIP {
 		m.regexName = strings.ToUpper(category)
 	}
 	key := tableKey(value, category)
