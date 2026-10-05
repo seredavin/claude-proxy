@@ -69,6 +69,9 @@ func (s *Session) MaskRequest(body []byte) ([]byte, Stats, error) {
 	if err := s.walk(root, modeDetect, &st); err != nil {
 		return nil, st, err
 	}
+	if s.tags {
+		addTagsHint(root)
+	}
 	out, err := encode(root)
 	return out, st, err
 }
