@@ -21,6 +21,9 @@ type Options struct {
 	// Key — ключ маскирования: суррогаты IP и хостов вычисляются из
 	// значения и ключа. nil — суррогаты случайные.
 	Key *Key
+	// Tags — IP, хосты и секреты уходят метками <<m:категория:токен>> с
+	// зашифрованным ключом значением. Действует только вместе с Key.
+	Tags bool
 }
 
 // Registry — таблицы всех меток. Одна на процесс.
@@ -41,7 +44,7 @@ func NewRegistry(rules *Rules, opts Options) *Registry {
 	return &Registry{
 		rules:    rules,
 		opts:     opts,
-		scanner:  surrogateScanner(rules.regexNames(), opts.Key != nil),
+		scanner:  surrogateScanner(rules.regexNames(), opts.Key != nil, opts.Tags && opts.Key != nil),
 		sessions: map[string]*Session{},
 	}
 }
@@ -61,6 +64,7 @@ func (r *Registry) Session(label string) *Session {
 			scanner:     r.scanner,
 			debug:       r.opts.Debug,
 			key:         r.opts.Key,
+			tags:        r.opts.Tags && r.opts.Key != nil,
 			log:         r.opts.Logger,
 			forward:     map[string]string{},
 			reverse:     map[string]string{},
@@ -87,6 +91,7 @@ type Session struct {
 	debug   bool
 	log     *slog.Logger
 	key     *Key
+	tags    bool
 
 	mu       sync.Mutex
 	forward  map[string]string // значение → суррогат
@@ -140,11 +145,15 @@ func (s *Session) lookupSurrogate(value, category string) (string, bool) {
 
 // mappedSurrogate — суррогат шестнадцатеричной IPv4-mapped записи value по
 // суррогату вложенного IPv4 inner: префикс до двух последних групп и
-// регистр — как в value.
+// регистр — как в value. В режиме меток inner — метка, и она встаёт
+// вместо двух последних групп.
 func mappedSurrogate(value, inner string) string {
-	b := netip.MustParseAddr(inner).As4()
 	last := strings.LastIndexByte(value, ':')
 	prefix := value[:strings.LastIndexByte(value[:last], ':')+1]
+	if strings.HasPrefix(inner, tagOpen) {
+		return prefix + inner
+	}
+	b := netip.MustParseAddr(inner).As4()
 	format := "%s%02x%02x:%02x%02x"
 	if strings.ContainsAny(value, "ABCDEF") {
 		format = "%s%02X%02X:%02X%02X"
@@ -207,6 +216,14 @@ func (s *Session) surrogateLocked(value string, m match) (sur string, err error)
 			s.record(key, value, sur, m)
 			return sur, nil
 		}
+	}
+
+	// Режим меток: метка с зашифрованным значением, у IP — каноническая
+	// запись адреса. Она биективна по построению, проверка коллизий не нужна.
+	if s.tags {
+		sur = s.key.sealTag(m.category, key)
+		s.record(key, value, sur, m)
+		return sur, nil
 	}
 
 	if s.key != nil && (m.category == categoryIP || m.category == categoryHost) {
@@ -320,10 +337,33 @@ func (s *Session) realFor(sur string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	real, ok := s.reverse[sur]
+	if !ok && s.tags && strings.HasPrefix(sur, tagOpen) {
+		real, ok = s.openTagLocked(sur)
+	}
 	if ok && s.debug {
 		s.log.Info("unmask", "token", s.label, "from", sur, "to", real)
 	}
 	return real, ok
+}
+
+// openTagLocked расшифровывает метку, которой нет в таблице (выдана до
+// перезапуска или другим процессом с тем же ключом), и заносит пару:
+// ход модели с этим значением потом перемаскируется в ту же метку.
+// Вызывается под s.mu.
+func (s *Session) openTagLocked(tag string) (string, bool) {
+	category, value, err := s.key.OpenTag(tag)
+	if err != nil {
+		return "", false
+	}
+	m := match{category: category}
+	if category != categoryHost && category != categorySecret && category != categoryIP {
+		m.regexName = strings.ToUpper(category)
+	}
+	key := tableKey(value, category)
+	if _, known := s.forward[key]; !known {
+		s.record(key, value, tag, m)
+	}
+	return value, true
 }
 
 // knownRegexValues находит точные вхождения значений, выданных
@@ -358,12 +398,21 @@ func (s *Session) heldTail(text string) string {
 	if limit > len(text) {
 		limit = len(text)
 	}
+	held := ""
 	for n := limit; n > 0; n-- {
 		if _, ok := s.prefixes[text[len(text)-n:]]; ok {
-			return text[len(text)-n:]
+			held = text[len(text)-n:]
+			break
 		}
 	}
-	return ""
+	// Метка могла быть выдана не этим процессом, и её префиксов в таблице
+	// нет: удерживается всё, что может оказаться её началом.
+	if s.tags {
+		if t := tagTail(text); len(t) > len(held) {
+			held = t
+		}
+	}
+	return held
 }
 
 // --- Суррогаты IP ---
@@ -477,7 +526,7 @@ func randByte() byte {
 
 // surrogateScanner — regex всех форм суррогатов. Совпадение — только
 // кандидат: подставляется лишь то, что есть в обратной таблице.
-func surrogateScanner(regexNames []string, keyed bool) *regexp.Regexp {
+func surrogateScanner(regexNames []string, keyed, tags bool) *regexp.Regexp {
 	names := append([]string{"SECRET"}, regexNames...)
 	for i, n := range names {
 		names[i] = regexp.QuoteMeta(n)
@@ -493,6 +542,9 @@ func surrogateScanner(regexNames []string, keyed bool) *regexp.Regexp {
 	if keyed {
 		// Суррогат хоста по ключу: base32 строчными, разрезанный на метки.
 		forms = append(forms, `host-[a-z2-7]+(?:\.[a-z2-7]+)*\.example`)
+	}
+	if tags {
+		forms = append(forms, tagPattern.String())
 	}
 	pattern := strings.Join(forms, "|")
 	re := regexp.MustCompile(pattern)

@@ -69,6 +69,9 @@ func (s *Session) MaskRequest(body []byte) ([]byte, Stats, error) {
 	if err := s.walk(root, modeDetect, &st); err != nil {
 		return nil, st, err
 	}
+	if s.tags {
+		addTagsHint(root)
+	}
 	out, err := encode(root)
 	return out, st, err
 }
@@ -195,6 +198,11 @@ func (s *Session) maskText(text string, create bool, st *Stats) (string, error) 
 		found := s.rules.detect(text, create)
 		if !create {
 			found = append(found, s.knownRegexValues(text)...)
+		}
+		// Метки (вставленные пользователем или прошлой проходкой) не
+		// трогаются: литерал или regex мог совпасть с куском токена.
+		if s.tags {
+			found = outsideTags(found, tagSpans(text))
 		}
 		matches, dropped := merge(found)
 		if len(matches) == 0 {

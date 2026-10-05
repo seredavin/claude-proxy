@@ -106,6 +106,9 @@ type Config struct {
 	// MaskKey — загруженный ключ.
 	MaskKeyFile string
 	MaskKey     *mask.Key
+	// MaskTags — IP, хосты и секреты уходят метками <<m:…>> с зашифрованным
+	// ключом значением (экспериментальный режим).
+	MaskTags bool
 
 	// TraceDir — каталог трассировки тел запросов и ответов; пусто —
 	// трассировка выключена.
@@ -137,6 +140,7 @@ type Raw struct {
 	MaskOnError string
 	MaskDebug   string
 	MaskKeyFile string
+	MaskTags    string
 	TraceDir    string
 }
 
@@ -172,6 +176,7 @@ func (r *Raw) bindings() []binding {
 		{&r.MaskOnError, "mask-on-error", []string{"CLAUDE_PROXY_MASK_ON_ERROR"}},
 		{&r.MaskDebug, "mask-debug", []string{"CLAUDE_PROXY_MASK_DEBUG"}},
 		{&r.MaskKeyFile, "mask-key-file", []string{"CLAUDE_PROXY_MASK_KEY_FILE"}},
+		{&r.MaskTags, "mask-tags", []string{"CLAUDE_PROXY_MASK_TAGS"}},
 		{&r.TraceDir, "trace-dir", []string{"CLAUDE_PROXY_TRACE_DIR"}},
 	}
 }
@@ -234,6 +239,8 @@ func Bind(fs *flag.FlagSet) *Raw {
 		func(v string) error { r.MaskDebug = v; return nil })
 	fs.StringVar(&r.MaskKeyFile, "mask-key-file", d.MaskKeyFile,
 		"файл ключа маскирования (claude-proxy gen-mask-key): суррогаты IP и хостов одинаковы во всех процессах с этим ключом")
+	fs.BoolFunc("mask-tags", "экспериментально: IP, хосты и секреты уходят метками <<m:категория:шифртекст>>, нужен --mask-key-file",
+		func(v string) error { r.MaskTags = v; return nil })
 	fs.StringVar(&r.TraceDir, "trace-dir", d.TraceDir,
 		"каталог трассировки: тела запросов и ответов по файлам на запрос (режим отладки, тела с секретами!)")
 
@@ -308,6 +315,17 @@ func Resolve(r Raw) (*Config, error) {
 			return nil, fmt.Errorf("mask-debug: %q не похоже на булево значение", r.MaskDebug)
 		}
 		c.MaskDebug = debug
+	}
+	if v := strings.TrimSpace(r.MaskTags); v != "" {
+		tags, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("mask-tags: %q не похоже на булево значение", r.MaskTags)
+		}
+		c.MaskTags = tags
+	}
+	// Метка — шифртекст под ключом: без ключа её нечем выдать.
+	if c.MaskTags && c.MaskKeyFile == "" {
+		return nil, fmt.Errorf("--mask-tags требует ключ маскирования (--mask-key-file)")
 	}
 	// Флаги маскирования без файла правил — скорее всего забыли сам файл.
 	if c.MaskRules == "" {
