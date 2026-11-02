@@ -625,3 +625,54 @@ func TestChainAPIKeyToOAuth(t *testing.T) {
 		t.Errorf("пропуск на шлюз утёк до Anthropic: %q", got)
 	}
 }
+
+// rewindTransport имитирует повтор HTTP/2: тело первой попытки уходит в
+// никуда, вторая берёт его заново через GetBody.
+type rewindTransport struct{ next http.RoundTripper }
+
+func (rt rewindTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.GetBody == nil {
+		return nil, io.ErrUnexpectedEOF
+	}
+	_, _ = io.Copy(io.Discard, r.Body)
+	body, err := r.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	r = r.Clone(r.Context())
+	r.Body = body
+	return rt.next.RoundTrip(r)
+}
+
+func TestТелоПереотправляетсяПриПовторе(t *testing.T) {
+	var got string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = string(b)
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	set, err := auth.Parse("default:secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := New(Options{
+		Mode:         config.ModeOAuth,
+		Tokens:       set,
+		Upstream:     target,
+		MaxBodyBytes: 1 << 20,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Transport:    rewindTransport{next: http.DefaultTransport},
+	})
+	srv := httptest.NewServer(gw)
+	defer srv.Close()
+
+	header := http.Header{"X-Gateway-Key": {"secret"}, "Authorization": {"Bearer x"}}
+	resp := do(t, srv, http.MethodPost, "/v1/messages", header, `{"model":"x"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус %d, ожидалось 200", resp.StatusCode)
+	}
+	if got != `{"model":"x"}` {
+		t.Errorf("апстрим получил %q", got)
+	}
+}
