@@ -27,6 +27,8 @@ type Key struct {
 	pubNet                           []byte
 	nameMAC                          []byte
 	nameEnc                          cipher.Block
+	tagMAC                           []byte
+	tagEnc                           cipher.Block
 	fingerprint                      string
 }
 
@@ -56,6 +58,8 @@ func NewKey(master []byte) (*Key, error) {
 		pubNet:      sub("pub-net"),
 		nameMAC:     sub("name-mac"),
 		nameEnc:     block("name-enc"),
+		tagMAC:      sub("tag-mac"),
+		tagEnc:      block("tag-enc"),
 		fingerprint: hex.EncodeToString(sub("fingerprint")[:4]),
 	}, nil
 }

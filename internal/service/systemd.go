@@ -337,6 +337,7 @@ func envLines(raw config.Raw) []string {
 		{"CLAUDE_PROXY_MASK_ON_ERROR", raw.MaskOnError},
 		{"CLAUDE_PROXY_MASK_DEBUG", raw.MaskDebug},
 		{"CLAUDE_PROXY_MASK_KEY_FILE", raw.MaskKeyFile},
+		{"CLAUDE_PROXY_MASK_TAGS", raw.MaskTags},
 		{"CLAUDE_PROXY_TRACE_DIR", raw.TraceDir},
 	}
 

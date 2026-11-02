@@ -72,6 +72,18 @@ func TestEnvLinesКлючМаскирования(t *testing.T) {
 	}
 }
 
+func TestEnvLinesРежимМеток(t *testing.T) {
+	raw := config.Defaults()
+	raw.Tokens = "default:abc"
+	if strings.Contains(strings.Join(envLines(raw), "\n"), "CLAUDE_PROXY_MASK_TAGS") {
+		t.Error("без режима переменной быть не должно")
+	}
+	raw.MaskTags = "true"
+	if !strings.Contains(strings.Join(envLines(raw), "\n"), `CLAUDE_PROXY_MASK_TAGS="true"`) {
+		t.Error("режим не попал в файл")
+	}
+}
+
 func TestКлючМаскированияНедоступенСервисномуПользователю(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mask.key")
 	if err := os.WriteFile(path, []byte("x\n"), 0o600); err != nil {

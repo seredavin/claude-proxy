@@ -215,29 +215,30 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, g.maxBody)
 	}
 
-	// Тело читается целиком только когда его надо переписать или записать.
-	if g.masker != nil || rec.trace != nil {
-		body, ok := g.readBody(rec, r)
-		if !ok {
+	// Тело читается целиком всегда: кроме маскирования и трассы, оно нужно
+	// транспорту для повтора. HTTP/2-фронт Anthropic иногда сбрасывает поток
+	// с PROTOCOL_ERROR, и без GetBody повторить запрос на новом соединении
+	// нельзя — клиент получил бы 502.
+	body, ok := g.readBody(rec, r)
+	if !ok {
+		g.logAccess(rec, r, start, label)
+		return
+	}
+	if rec.trace != nil {
+		rec.trace.rec.WriteRequest(trace.Client, body)
+	}
+	if g.masker != nil {
+		state := &maskState{session: g.masker.Session(label)}
+		rec.mask = state
+		r = r.WithContext(context.WithValue(r.Context(), maskStateKey{}, state))
+		if body, ok = g.maskBody(rec, state, body); !ok {
 			g.logAccess(rec, r, start, label)
 			return
 		}
-		if rec.trace != nil {
-			rec.trace.rec.WriteRequest(trace.Client, body)
-		}
-		if g.masker != nil {
-			state := &maskState{session: g.masker.Session(label)}
-			rec.mask = state
-			r = r.WithContext(context.WithValue(r.Context(), maskStateKey{}, state))
-			if body, ok = g.maskBody(rec, state, body); !ok {
-				g.logAccess(rec, r, start, label)
-				return
-			}
-		}
-		setBody(r, body)
-		if rec.trace != nil {
-			rec.trace.rec.WriteRequest(trace.Upstream, body)
-		}
+	}
+	setBody(r, body)
+	if rec.trace != nil {
+		rec.trace.rec.WriteRequest(trace.Upstream, body)
 	}
 
 	g.proxy.ServeHTTP(rec, r)
@@ -279,15 +280,20 @@ func (g *Gateway) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool
 	return body, true
 }
 
-// setBody подменяет тело запроса прочитанными байтами.
+// setBody подменяет тело запроса прочитанными байтами. GetBody позволяет
+// транспорту переотправить тело, если соединение сбросили после записи.
 func setBody(r *http.Request, body []byte) {
 	if len(body) == 0 {
 		r.Body = http.NoBody
+		r.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
 		r.ContentLength = 0
 		r.Header.Del("Content-Length")
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
 	r.ContentLength = int64(len(body))
 	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 }

@@ -49,11 +49,11 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 	// состояние и логгер.
 	var masker *mask.Registry
 	if cfg.Mask != nil {
-		masker = mask.NewRegistry(cfg.Mask, mask.Options{Debug: cfg.MaskDebug, Logger: log, Key: cfg.MaskKey})
+		masker = mask.NewRegistry(cfg.Mask, mask.Options{Debug: cfg.MaskDebug, Logger: log, Key: cfg.MaskKey, Tags: cfg.MaskTags})
 		attrs := []any{"rules", cfg.MaskRules, "summary", cfg.Mask.Summary(), "on_error", string(cfg.MaskOnError),
 			"keyed", cfg.MaskKey != nil}
 		if cfg.MaskKey != nil {
-			attrs = append(attrs, "fingerprint", cfg.MaskKey.Fingerprint())
+			attrs = append(attrs, "fingerprint", cfg.MaskKey.Fingerprint(), "tags", cfg.MaskTags)
 		}
 		log.Info("маскирование включено", attrs...)
 		if cfg.MaskDebug {
