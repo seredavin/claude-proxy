@@ -356,6 +356,117 @@ stderr печатается одна строка — адрес звена, а�
 задайте `--upstream-key`. В режиме `oauth` также нужен
 `ANTHROPIC_AUTH_TOKEN`.
 
+#### OpenAI по подписке ChatGPT
+
+Войдите в ChatGPT на ноутбуке и выберите модель из списка для вашего
+аккаунта. `<модель>` ниже замените на идентификатор из первого столбца.
+
+```bash
+claude-proxy chatgpt login --profile personal
+claude-proxy chatgpt models --profile personal
+claude-proxy local --openai-upstream 'personal:<модель>'
+```
+
+Чтобы оставить цепочку Anthropic для остальных меток и выбрать OpenAI
+для Claude Code, укажите нужный токен первым:
+
+```bash
+claude-proxy local \
+  --tokens "openai:${OPENAI_GATEWAY_TOKEN},anthropic:${ANTHROPIC_GATEWAY_TOKEN}" \
+  --upstream https://edge.example.com:9443 --upstream-key "$EDGE_TOKEN" \
+  --openai-routes 'openai=personal:<модель>'
+```
+
+Это токены локального шлюза, их можно выпустить командой `gen-token`.
+Маршруты OpenAI задаются списком `метка=профиль:модель` через запятую.
+Те же настройки доступны в `local.env` как
+`CLAUDE_PROXY_OPENAI_UPSTREAM` и `CLAUDE_PROXY_OPENAI_ROUTES`.
+Для Anthropic-маршрутов с OAuth клиент по-прежнему предъявляет свой
+`ANTHROPIC_AUTH_TOKEN`.
+
+Профили хранятся с правами `0600` в каталоге
+`$XDG_CONFIG_HOME/claude-proxy/chatgpt` (по умолчанию
+`~/.config/claude-proxy/chatgpt`). Чтобы завершить сеанс, выполните
+`claude-proxy chatgpt logout --profile personal`. Для OpenAI на удалённом шлюзе используйте настройку ниже.
+
+Адаптер поддерживает текст и локальные инструменты с JSON-схемой. Для
+`count_tokens` возвращается приблизительная оценка по размеру запроса в
+UTF-8. Параметры генерации, отсутствующие в preview API, не передаются.
+Встроенные инструменты Anthropic и нетекстовые блоки вызывают ошибку
+совместимости. [Ограничения OpenAI Responses API](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+
+#### OpenAI на удалённом шлюзе
+
+На сервере добавьте отдельный токен и маршрут OpenAI в
+`/etc/claude-proxy/claude-proxy.env`. Пример предполагает, что общий
+апстрим уже обслуживает Anthropic.
+
+```dotenv
+CLAUDE_PROXY_TOKENS="claude:<существующий-токен>,openai:<новый-токен>"
+CLAUDE_PROXY_OPENAI_ROUTES="openai=personal:<модель>"
+```
+
+Модель берётся из `chatgpt models`. Для использования OpenAI как общего
+апстрима задайте `CLAUDE_PROXY_OPENAI_UPSTREAM="personal:<модель>"`.
+Настройки маршрутов OpenAI и Anthropic могут использоваться вместе.
+
+Войдите на ноутбуке отдельным профилем для сервера, затем перенесите
+профиль по SSH. Пример использует стандартный каталог состояния и
+пользователя systemd-сервиса. Команда на сервере запускается от имени
+сервисного пользователя и требует права на его каталог состояния.
+
+```bash
+claude-proxy chatgpt login --profile personal
+claude-proxy chatgpt models --profile personal
+ssh admin@edge.example.com \
+  'sudo -n -u claude-proxy /usr/local/bin/claude-proxy chatgpt import --profile personal --store-dir /var/lib/claude-proxy/chatgpt' \
+  < "${XDG_CONFIG_HOME:-$HOME/.config}/claude-proxy/chatgpt/personal.json"
+```
+
+Профиль содержит OAuth-токены и переносится напрямую через stdin.
+После импорта сеанс обновляет сервер. Для параллельных запусков с OpenAI
+на ноутбуке заведите отдельный профиль. После изменения серверного
+EnvironmentFile перезапустите сервис.
+
+На ноутбуке задайте в `local.env`:
+
+```dotenv
+CLAUDE_PROXY_UPSTREAM="https://edge.example.com:9443"
+CLAUDE_PROXY_UPSTREAM_KEY="<новый-токен-метки-openai>"
+CLAUDE_PROXY_UPSTREAM_CHATGPT="true"
+```
+
+Затем выполните `claude-proxy local`. Для отдельного запуска с Anthropic
+используйте прежний токен и конфигурацию без `UPSTREAM_CHATGPT`, например
+через `local --env-file ~/.config/claude-proxy/anthropic.env`.
+[Перенос профиля ChatGPT на собственный сервер](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
+
+#### Выбор модели OpenAI в Claude Code
+
+Чтобы один токен шлюза открывал несколько моделей, задайте на сервере
+псевдонимы. Замените `<быстрая-модель>` и `<мощная-модель>` на
+идентификаторы из `chatgpt models`.
+
+```dotenv
+CLAUDE_PROXY_OPENAI_ROUTES="openai=personal:gpt-fast=<быстрая-модель>|gpt-strong=<мощная-модель>"
+```
+
+Для общего апстрима используется тот же список без префикса метки:
+`CLAUDE_PROXY_OPENAI_UPSTREAM="personal:gpt-fast=<быстрая-модель>|gpt-strong=<мощная-модель>"`.
+Вертикальная черта разделяет модели одного апстрима, запятая — маршруты.
+
+После загрузки новой конфигурации запустите первую сессию с выбранным
+псевдонимом, например `claude-proxy local -- --model claude-gpt-fast`. Команда
+`local` включает получение списка моделей шлюза. В Claude Code откройте
+`/model` и выберите `gpt-strong` или выполните `/model claude-gpt-strong`.
+Прокси добавляет `claude-` к идентификаторам, у которых нет `claude` или
+`anthropic`, чтобы позиции прошли фильтр Claude Code. В меню отображаются
+исходные псевдонимы. При прямом подключении к
+шлюзу включите `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` в окружении
+Claude Code. Сервер отклоняет идентификаторы за пределами списка выбранного
+маршрута. Формат `профиль:модель` по-прежнему фиксирует модель.
+[Настройки Claude Code](https://code.claude.com/docs/en/env-vars)
+
 #### Вручную, через `run`
 
 То же самое можно собрать из `run --tls none` — например, чтобы держать

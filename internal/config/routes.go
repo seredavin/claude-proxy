@@ -11,7 +11,8 @@ import (
 // Route — маршрут апстрима по метке токена: запросы токена с этой меткой
 // уходят на свой апстрим со своим пропуском, а не на общий.
 type Route struct {
-	Label string
+	Label  string
+	OpenAI *OpenAITarget
 	// Upstream — базовый URL апстрима маршрута.
 	Upstream *url.URL
 	// Key — пропуск на апстрим маршрута (X-Gateway-Key); пусто — заголовок

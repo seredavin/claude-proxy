@@ -8,9 +8,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/seredavin/claude-proxy/internal/chatgpt"
 	"github.com/seredavin/claude-proxy/internal/config"
 	"github.com/seredavin/claude-proxy/internal/gateway"
 	"github.com/seredavin/claude-proxy/internal/mask"
@@ -40,6 +42,16 @@ func Run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 // процессе и должен знать порт (например, при --listen 127.0.0.1:0) и момент,
 // с которого соединения уже принимаются. nil — не уведомлять.
 func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready func(net.Addr)) error {
+	var token func(context.Context, string) (string, error)
+	if cfg.HasOpenAI() {
+		token = chatgpt.NewStore(filepath.Join(cfg.StateDir, "chatgpt")).AccessToken
+	}
+	return RunLocal(ctx, cfg, log, ready, token)
+}
+
+// RunLocal запускает шлюз с доступом к локальным профилям ChatGPT.
+func RunLocal(ctx context.Context, cfg *config.Config, log *slog.Logger, ready func(net.Addr),
+	chatGPTToken func(context.Context, string) (string, error)) error {
 	provider, err := tlsconf.New(cfg, log)
 	if err != nil {
 		return err
@@ -73,17 +85,20 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 	}
 
 	gw := gateway.New(gateway.Options{
-		Mode:         cfg.Mode,
-		Tokens:       cfg.Tokens,
-		APIKey:       cfg.APIKey,
-		Upstream:     cfg.Upstream,
-		UpstreamKey:  cfg.UpstreamKey,
-		Routes:       cfg.Routes,
-		MaxBodyBytes: cfg.MaxBodyBytes,
-		Logger:       log,
-		Masker:       masker,
-		MaskOnError:  cfg.MaskOnError,
-		Tracer:       tracer,
+		Mode:              cfg.Mode,
+		Tokens:            cfg.Tokens,
+		APIKey:            cfg.APIKey,
+		Upstream:          cfg.Upstream,
+		UpstreamKey:       cfg.UpstreamKey,
+		OpenAI:            cfg.OpenAI,
+		ChatGPTToken:      chatGPTToken,
+		ChatGPTChainLabel: cfg.ChatGPTChainLabel,
+		Routes:            cfg.Routes,
+		MaxBodyBytes:      cfg.MaxBodyBytes,
+		Logger:            log,
+		Masker:            masker,
+		MaskOnError:       cfg.MaskOnError,
+		Tracer:            tracer,
 	})
 
 	srv := &http.Server{

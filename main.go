@@ -45,6 +45,8 @@ func dispatch(args []string) error {
 		return cmdRun(args)
 	case "local":
 		return cmdLocal(args)
+	case "chatgpt":
+		return cmdChatGPT(args)
 	case "install":
 		return cmdInstall(args)
 	case "uninstall":
@@ -79,7 +81,8 @@ func usage(w io.Writer) {
 
 Команды:
   run           Запустить шлюз (команда по умолчанию).
-  local         Запустить claude через локальное звено цепочки без TLS.
+  local         Запустить claude через локальное звено без TLS.
+  chatgpt       Войти или выйти из локального профиля ChatGPT.
   install       Разложить бинарь, конфигурацию и systemd-юнит, запустить сервис.
   uninstall     Остановить сервис и убрать юнит. С --purge — снести всё.
   gen-token     Сгенерировать токен шлюза.

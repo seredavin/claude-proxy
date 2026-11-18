@@ -36,7 +36,8 @@ type Options struct {
 	Token string
 	// AuthToken — токен подписки для режима oauth. В режиме apikey не нужен:
 	// claude предъявляет пропуск, ключ Console подставляет само звено.
-	AuthToken string
+	AuthToken    string
+	ChatGPTToken func(context.Context, string) (string, error)
 
 	// ClaudePath — исполняемый файл claude, уже найденный.
 	ClaudePath string
@@ -64,7 +65,9 @@ type Options struct {
 func Run(ctx context.Context, o Options) (int, error) {
 	runGateway := o.runGateway
 	if runGateway == nil {
-		runGateway = server.RunReady
+		runGateway = func(ctx context.Context, cfg *config.Config, log *slog.Logger, ready func(net.Addr)) error {
+			return server.RunLocal(ctx, cfg, log, ready, o.ChatGPTToken)
+		}
 	}
 
 	gwCtx, stopGateway := context.WithCancel(ctx)
@@ -186,6 +189,11 @@ func Environ(base []string, cfg *config.Config, token, authToken string) []strin
 	}
 	if cfg.Mode != config.ModeAPIKey {
 		set["ANTHROPIC_AUTH_TOKEN"] = authToken
+	}
+	if label, ok := cfg.Tokens.Lookup(token); ok && (cfg.OpenAIFor(label) != nil || (cfg.ChatGPTChainLabel != "" && cfg.ChatGPTChainLabel == label)) {
+		const discovery = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
+		set[discovery] = "1"
+		order = append(order, discovery)
 	}
 
 	env := make([]string, 0, len(base)+len(order))

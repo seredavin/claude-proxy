@@ -173,3 +173,40 @@ func TestPlanLocalРежимAPIKeyБезТокенаПодписки(t *testing.
 		t.Errorf("authToken в apikey = %q", plan.authToken)
 	}
 }
+
+func TestPlanLocalOpenAIWithoutAnthropicCredential(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--openai-upstream", "personal:gpt-test"},
+		{"--openai-routes", "local=personal:gpt-test"},
+	} {
+		plan, err := planFrom(t, flags, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.upstream != "api.openai.com" || plan.authToken != plan.token {
+			t.Fatal("ожидался OpenAI и только локальный пропуск для Claude Code")
+		}
+		if target := plan.cfg.OpenAIFor("local"); target == nil || target.Profile != "personal" {
+			t.Fatal("потерян выбранный профиль ChatGPT")
+		}
+	}
+}
+
+func TestPlanLocalRemoteChatGPT(t *testing.T) {
+	env := map[string]string{
+		"CLAUDE_PROXY_UPSTREAM":         "https://edge.example.com:9443",
+		"CLAUDE_PROXY_UPSTREAM_KEY":     "remote-openai-gateway-token",
+		"CLAUDE_PROXY_UPSTREAM_CHATGPT": "true",
+	}
+	plan, err := planFrom(t, nil, env, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.cfg.ChatGPTChainLabel != "local" || plan.authToken != plan.token || plan.cfg.HasOpenAI() {
+		t.Fatal("локальный процесс должен использовать серверный маршрут без локального профиля")
+	}
+	delete(env, "CLAUDE_PROXY_UPSTREAM_KEY")
+	if _, err := planFrom(t, nil, env, true); err == nil {
+		t.Fatal("ожидался отказ без пропуска удалённого шлюза")
+	}
+}
