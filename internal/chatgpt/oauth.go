@@ -49,7 +49,12 @@ func applyTokens(p *profile, next tokenResponse) {
 func (s *Store) exchange(ctx context.Context, form url.Values) (tokenResponse, error) {
 	var token tokenResponse
 	form.Set("resource", resource)
-	status, err := s.form(ctx, tokenURL, form, &token)
+	endpoint := tokenURL
+	if s.gateway != nil && form.Get("grant_type") == "refresh_token" {
+		endpoint = s.gateway.endpoint
+		form = url.Values{"client_id": {form.Get("client_id")}, "refresh_token": {form.Get("refresh_token")}}
+	}
+	status, err := s.form(ctx, endpoint, form, &token)
 	if err != nil {
 		return token, err
 	}
@@ -71,6 +76,9 @@ func (s *Store) form(ctx context.Context, endpoint string, form url.Values, resu
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if s.gateway != nil && endpoint == s.gateway.endpoint {
+		req.Header.Set("X-Gateway-Key", s.gateway.key)
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return 0, errors.New("не удалось связаться с сервером авторизации OpenAI")

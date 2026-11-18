@@ -6,12 +6,15 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/seredavin/claude-proxy/internal/auth"
+	"github.com/seredavin/claude-proxy/internal/chatgpt"
 	"github.com/seredavin/claude-proxy/internal/config"
 	"github.com/seredavin/claude-proxy/internal/launcher"
 )
@@ -26,7 +29,9 @@ type localPlan struct {
 	claudePath string
 	// upstream — адрес для строки запуска: маршрут метки токена звена или
 	// общий апстрим.
-	upstream string
+	upstream        string
+	refreshUpstream *url.URL
+	refreshKey      string
 }
 
 func cmdLocal(args []string) error {
@@ -53,6 +58,7 @@ func cmdLocal(args []string) error {
 	envFile := fs.String("env-file", localConfigFile(), "файл настроек; отсутствие — не ошибка")
 	claude := fs.String("claude", "claude", "исполняемый файл claude")
 	fs.String("upstream-chatgpt", "", "внешний шлюз использует ChatGPT для выбранного пропуска (true/false)")
+	fs.String("upstream-chatgpt-profile", "", "локальный профиль ChatGPT для обновления через внешний шлюз")
 	logFile := fs.String("log-file", localLogFile(), "лог звена; в терминал он не пишется")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -70,6 +76,14 @@ func cmdLocal(args []string) error {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	profiles := localChatGPTStore()
+	if plan.cfg.ChatGPTChainProfile != "" {
+		if err := profiles.ConfigureRefreshGateway(plan.refreshUpstream, plan.refreshKey); err != nil {
+			return err
+		}
+		if _, err := profiles.AccessToken(ctx, plan.cfg.ChatGPTChainProfile); err != nil {
+			return err
+		}
+	}
 	if first, ok := plan.cfg.Tokens.First(); ok {
 		if target := plan.cfg.OpenAIFor(first.Label); target != nil {
 			if _, err := profiles.AccessToken(ctx, target.Profile); err != nil {
@@ -152,6 +166,17 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 	if chainValue == "" && fs.Lookup("upstream-chatgpt") != nil {
 		chainValue = fs.Lookup("upstream-chatgpt").Value.String()
 	}
+	chainProfile := strings.TrimSpace(getenv("CLAUDE_PROXY_UPSTREAM_CHATGPT_PROFILE"))
+	if chainProfile == "" && fs.Lookup("upstream-chatgpt-profile") != nil {
+		chainProfile = fs.Lookup("upstream-chatgpt-profile").Value.String()
+	}
+	if chainProfile != "" {
+		if !config.ValidProfileName(chainProfile) {
+			return nil, fmt.Errorf("--upstream-chatgpt-profile: недопустимое имя профиля")
+		}
+		chainValue = "true"
+		cfg.ChatGPTChainProfile = chainProfile
+	}
 	if chainValue != "" {
 		enabled, err := strconv.ParseBool(chainValue)
 		if err != nil {
@@ -183,6 +208,15 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 		return nil, errors.New("локальное звено работает только в цепочке: задайте адрес и пропуск внешнего звена " +
 			"(--upstream и --upstream-key, или --upstream-routes и --upstream-route-keys для метки " +
 			strconv.Quote(first.Label) + "; переменные CLAUDE_PROXY_* — в файле настроек)")
+	}
+	if cfg.ChatGPTChainProfile != "" {
+		plan.refreshUpstream, plan.refreshKey = cfg.Upstream, cfg.UpstreamKey
+		if rt := routeForLabel(cfg.Routes, first.Label); rt != nil {
+			plan.refreshUpstream, plan.refreshKey = rt.Upstream, rt.Key
+		}
+		if err := chatgpt.NewStore("").ConfigureRefreshGateway(plan.refreshUpstream, plan.refreshKey); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Mode == config.ModeOAuth && openAI == nil && cfg.ChatGPTChainLabel == "" {
 		plan.authToken = getenv("ANTHROPIC_AUTH_TOKEN")

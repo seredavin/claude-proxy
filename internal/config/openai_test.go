@@ -77,3 +77,22 @@ func TestOpenAIModelAliases(t *testing.T) {
 		t.Error("поведение фиксированной модели изменилось")
 	}
 }
+
+func TestClientOAuthRequiresTLSAndGatewayOAuth(t *testing.T) {
+	raw := Defaults()
+	raw.Tokens = "gpt:gateway"
+	raw.OpenAIRoutes = "gpt=@client:fast=gpt-test"
+	raw.TLS, raw.CertFile, raw.KeyFile = "files", "server.crt", "server.key"
+	cfg, err := Resolve(raw)
+	if err != nil || cfg.OpenAIFor("gpt") == nil || !cfg.OpenAIFor("gpt").ClientOAuth || cfg.OpenAIFor("gpt").Profile != "" {
+		t.Fatalf("не принят клиентский маршрут: %v", err)
+	}
+	raw.Mode = "apikey"
+	if _, err := Resolve(raw); err == nil {
+		t.Fatal("клиентский OAuth принят в режиме apikey")
+	}
+	raw.Mode, raw.TLS, raw.Listen = "oauth", "none", "127.0.0.1:0"
+	if _, err := Resolve(raw); err == nil {
+		t.Fatal("клиентский OAuth принят без TLS")
+	}
+}

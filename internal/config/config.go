@@ -81,9 +81,10 @@ type Config struct {
 
 	// UpstreamKey — пропуск на следующий шлюз, когда апстрим не Anthropic,
 	// а ещё один claude-proxy. Уходит наверх в X-Gateway-Key.
-	UpstreamKey       string
-	OpenAI            *OpenAITarget
-	ChatGPTChainLabel string
+	UpstreamKey         string
+	OpenAI              *OpenAITarget
+	ChatGPTChainLabel   string
+	ChatGPTChainProfile string
 
 	// Routes — маршруты апстримов по меткам токенов: запрос метки уходит
 	// на свой апстрим со своим пропуском. Пусто — все запросы на Upstream.

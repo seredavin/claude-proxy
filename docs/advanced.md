@@ -441,6 +441,38 @@ CLAUDE_PROXY_UPSTREAM_CHATGPT="true"
 через `local --env-file ~/.config/claude-proxy/anthropic.env`.
 [Перенос профиля ChatGPT на собственный сервер](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
 
+#### OpenAI через шлюз с клиентским профилем
+
+При режиме `@client` OAuth-профиль хранится у клиента. Внешний шлюз
+должен принимать HTTPS и работать в режиме `oauth`. Добавьте токен с
+меткой `openai` в `CLAUDE_PROXY_TOKENS` и настройте маршрут:
+
+```dotenv
+CLAUDE_PROXY_OPENAI_ROUTES="openai=@client:gpt-fast=<модель>"
+```
+
+Маркер `@client` действует и в `CLAUDE_PROXY_OPENAI_UPSTREAM`, когда
+OpenAI служит общим апстримом. Модель или список псевдонимов задаётся
+на сервере как обычно. Войдите в ChatGPT через
+`claude-proxy chatgpt login --profile personal` на компьютере с браузером.
+Если рабочий компьютер другой, передайте файл профиля на него по
+защищённому каналу и импортируйте через
+`claude-proxy chatgpt import --profile personal` со стандартного ввода.
+
+Настройки клиента для `local --env-file openai.env`:
+
+```dotenv
+CLAUDE_PROXY_UPSTREAM="https://edge.example.com:9443"
+CLAUDE_PROXY_UPSTREAM_KEY="<токен-метки-openai>"
+CLAUDE_PROXY_UPSTREAM_CHATGPT_PROFILE="personal"
+```
+
+Для модели из примера передайте `-- --model claude-gpt-fast`. Если
+истёк access token, `local` обновляет профиль через тот же шлюз.
+Шлюз видит токены во время обработки, поэтому доверяйте его оператору.
+Обновление не попадает в трассу. После перехода оператор может удалить
+предыдущий серверный профиль.
+
 #### Выбор модели OpenAI в Claude Code
 
 Чтобы один токен шлюза открывал несколько моделей, задайте на сервере

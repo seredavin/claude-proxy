@@ -85,20 +85,21 @@ func RunLocal(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 	}
 
 	gw := gateway.New(gateway.Options{
-		Mode:              cfg.Mode,
-		Tokens:            cfg.Tokens,
-		APIKey:            cfg.APIKey,
-		Upstream:          cfg.Upstream,
-		UpstreamKey:       cfg.UpstreamKey,
-		OpenAI:            cfg.OpenAI,
-		ChatGPTToken:      chatGPTToken,
-		ChatGPTChainLabel: cfg.ChatGPTChainLabel,
-		Routes:            cfg.Routes,
-		MaxBodyBytes:      cfg.MaxBodyBytes,
-		Logger:            log,
-		Masker:            masker,
-		MaskOnError:       cfg.MaskOnError,
-		Tracer:            tracer,
+		Mode:                cfg.Mode,
+		Tokens:              cfg.Tokens,
+		APIKey:              cfg.APIKey,
+		Upstream:            cfg.Upstream,
+		UpstreamKey:         cfg.UpstreamKey,
+		OpenAI:              cfg.OpenAI,
+		ChatGPTToken:        chatGPTToken,
+		ChatGPTChainLabel:   cfg.ChatGPTChainLabel,
+		ChatGPTChainProfile: cfg.ChatGPTChainProfile,
+		Routes:              cfg.Routes,
+		MaxBodyBytes:        cfg.MaxBodyBytes,
+		Logger:              log,
+		Masker:              masker,
+		MaskOnError:         cfg.MaskOnError,
+		Tracer:              tracer,
 	})
 
 	srv := &http.Server{

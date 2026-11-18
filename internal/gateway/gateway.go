@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/seredavin/claude-proxy/internal/auth"
+	"github.com/seredavin/claude-proxy/internal/chatgpt"
 	"github.com/seredavin/claude-proxy/internal/config"
 	"github.com/seredavin/claude-proxy/internal/mask"
 	"github.com/seredavin/claude-proxy/internal/responses"
@@ -48,10 +49,11 @@ type Options struct {
 	Upstream *url.URL
 	// UpstreamKey — пропуск на следующий шлюз цепочки. Пусто — апстрим
 	// Anthropic, подставлять нечего.
-	UpstreamKey       string
-	OpenAI            *config.OpenAITarget
-	ChatGPTToken      func(context.Context, string) (string, error)
-	ChatGPTChainLabel string
+	UpstreamKey         string
+	OpenAI              *config.OpenAITarget
+	ChatGPTToken        func(context.Context, string) (string, error)
+	ChatGPTChainLabel   string
+	ChatGPTChainProfile string
 	// Routes — маршруты апстримов по меткам токенов: запрос метки уходит на
 	// свой апстрим со своим пропуском. nil — все запросы на Upstream.
 	Routes       []config.Route
@@ -72,13 +74,16 @@ type Options struct {
 
 // Gateway — http.Handler шлюза.
 type Gateway struct {
-	mode              config.Mode
-	tokens            auth.Set
-	apiKey            string
-	upstream          *url.URL
-	upstreamKey       string
-	openAI            *config.OpenAITarget
-	chatGPTChainLabel string
+	mode                config.Mode
+	tokens              auth.Set
+	apiKey              string
+	upstream            *url.URL
+	upstreamKey         string
+	openAI              *config.OpenAITarget
+	chatGPTChainLabel   string
+	chatGPTChainProfile string
+	chatGPTToken        func(context.Context, string) (string, error)
+	refreshRelay        http.Handler
 	// routes — апстримы по меткам токенов; nil — маршрутов нет, и все
 	// запросы идут на upstream с upstreamKey.
 	routes  map[string]route
@@ -120,18 +125,21 @@ func New(opts Options) *Gateway {
 	}
 
 	g := &Gateway{
-		mode:              opts.Mode,
-		tokens:            opts.Tokens,
-		apiKey:            opts.APIKey,
-		upstream:          opts.Upstream,
-		upstreamKey:       opts.UpstreamKey,
-		openAI:            opts.OpenAI,
-		chatGPTChainLabel: opts.ChatGPTChainLabel,
-		maxBody:           opts.MaxBodyBytes,
-		log:               opts.Logger,
-		masker:            opts.Masker,
-		maskOnError:       opts.MaskOnError,
-		tracer:            opts.Tracer,
+		mode:                opts.Mode,
+		tokens:              opts.Tokens,
+		apiKey:              opts.APIKey,
+		upstream:            opts.Upstream,
+		upstreamKey:         opts.UpstreamKey,
+		openAI:              opts.OpenAI,
+		chatGPTChainLabel:   opts.ChatGPTChainLabel,
+		chatGPTChainProfile: opts.ChatGPTChainProfile,
+		chatGPTToken:        opts.ChatGPTToken,
+		refreshRelay:        chatgpt.RefreshRelay(transport),
+		maxBody:             opts.MaxBodyBytes,
+		log:                 opts.Logger,
+		masker:              opts.Masker,
+		maskOnError:         opts.MaskOnError,
+		tracer:              opts.Tracer,
 	}
 	if len(opts.Routes) > 0 {
 		g.routes = make(map[string]route, len(opts.Routes))
@@ -248,6 +256,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == config.ChatGPTRefreshPath {
+		g.serveChatGPTRefresh(rec, r)
+		return
+	}
+
 	label, ok := g.authorize(rec, r)
 	if !ok {
 		g.logAccess(rec, r, start, label)
@@ -257,6 +270,19 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if g.isChatGPTChain(label) {
 		r.Header.Del("Authorization")
 		r.Header.Del("X-Api-Key")
+		if g.chatGPTChainProfile != "" && r.Method == http.MethodPost && r.URL.Path == "/v1/messages" {
+			if g.chatGPTToken == nil {
+				writeError(rec, http.StatusServiceUnavailable, "api_error", "профиль ChatGPT недоступен")
+				return
+			}
+			token, err := g.chatGPTToken(r.Context(), g.chatGPTChainProfile)
+			if err != nil {
+				writeError(rec, http.StatusServiceUnavailable, "api_error", "не удалось обновить профиль ChatGPT, проверьте подключение или повторите вход")
+				g.logAccess(rec, r, start, label)
+				return
+			}
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
 	}
 
 	// Маршрут выбирается по метке сработавшего токена. Без маршрутов
