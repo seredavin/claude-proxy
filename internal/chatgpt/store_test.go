@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -186,5 +187,49 @@ func TestImportKeepsSeparateHostAndProtectsActiveProfile(t *testing.T) {
 	}
 	if err := remote.Import(ctx, "personal", strings.NewReader(string(wire))); err == nil {
 		t.Fatal("повторный импорт не должен переписывать активную сессию")
+	}
+}
+
+func TestAccessTokenRotatesThroughGateway(t *testing.T) {
+	s := NewStore(t.TempDir())
+	old := profile{ClientID: "oaiapp_test", RefreshToken: "old-refresh", Scope: "resource.invoke chatgpt.tokens.use.direct"}
+	path := filepath.Join(s.dir, "client.json")
+	if err := saveProfile(path, old); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	relay := RefreshRelay(testTransport(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if r.URL.String() != tokenURL || r.Header.Get("X-Gateway-Key") != "" ||
+			r.ParseForm() != nil || r.Form.Get("resource") != resource || r.Form.Get("grant_type") != "refresh_token" ||
+			r.Form.Get("client_id") != old.ClientID || r.Form.Get("refresh_token") != old.RefreshToken {
+			t.Error("неверный запрос обновления")
+		}
+		return reply(tokenResponse{TokenType: "Bearer", AccessToken: "new-access", RefreshToken: "new-refresh", ExpiresIn: 3600})
+	}))
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/_claude_proxy/chatgpt/refresh" || r.Header.Get("X-Gateway-Key") != "gateway-test" {
+			t.Error("неверная авторизация на шлюзе")
+		}
+		relay.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	s.client.Transport = srv.Client().Transport
+	upstream, _ := url.Parse(srv.URL)
+	if err := s.ConfigureRefreshGateway(upstream, "gateway-test"); err != nil {
+		t.Fatal(err)
+	}
+	var pending sync.WaitGroup
+	for range 2 {
+		pending.Go(func() {
+			if got, err := s.AccessToken(context.Background(), "client"); got != "new-access" || err != nil {
+				t.Errorf("обновление: %v", err)
+			}
+		})
+	}
+	pending.Wait()
+	got, err := readProfile(path)
+	if err != nil || got.RefreshToken != "new-refresh" || calls.Load() != 1 {
+		t.Fatalf("ротация: %v, запросов %d", err, calls.Load())
 	}
 }

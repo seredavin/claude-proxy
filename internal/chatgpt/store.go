@@ -26,8 +26,9 @@ const (
 )
 
 type Store struct {
-	dir    string
-	client *http.Client
+	dir     string
+	client  *http.Client
+	gateway *refreshGateway
 }
 
 func NewStore(dir string) *Store {

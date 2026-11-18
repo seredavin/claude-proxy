@@ -210,3 +210,20 @@ func TestPlanLocalRemoteChatGPT(t *testing.T) {
 		t.Fatal("ожидался отказ без пропуска удалённого шлюза")
 	}
 }
+
+func TestLocalClientOAuthProfileUsesSelectedGateway(t *testing.T) {
+	env := map[string]string{
+		"CLAUDE_PROXY_UPSTREAM":                 "https://gateway.example",
+		"CLAUDE_PROXY_UPSTREAM_KEY":             "gateway-test",
+		"CLAUDE_PROXY_UPSTREAM_CHATGPT_PROFILE": "personal",
+	}
+	got, err := planFrom(t, nil, env, true)
+	if err != nil || got.cfg.ChatGPTChainProfile != "personal" || got.authToken != got.token ||
+		got.refreshUpstream.Host != "gateway.example" || got.refreshKey != "gateway-test" {
+		t.Fatalf("план клиентского OAuth: %v", err)
+	}
+	env["CLAUDE_PROXY_UPSTREAM"] = "https://gateway.example/path"
+	if _, err := planFrom(t, nil, env, true); err == nil {
+		t.Fatal("адрес с путём принят для OAuth")
+	}
+}

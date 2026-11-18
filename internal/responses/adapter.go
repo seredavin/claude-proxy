@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/seredavin/claude-proxy/internal/config"
 )
@@ -84,12 +85,26 @@ func (a Adapter) RoundTrip(req *http.Request, target *config.OpenAITarget, trace
 		// Оценка по UTF-8 сериализованного запроса.
 		return jsonResponse(req, 200, object{"input_tokens": (len(payload) + 3) / 4}), nil
 	}
-	if a.AccessToken == nil {
-		return jsonResponse(req, 503, errorMessage("api_error", "профиль ChatGPT недоступен")), nil
-	}
-	token, err := a.AccessToken(req.Context(), target.Profile)
-	if err != nil {
-		return jsonResponse(req, 503, errorMessage("api_error", "профиль ChatGPT недоступен, проверьте локальный вход")), nil
+	var token string
+	if target.ClientOAuth {
+		values := req.Header.Values("Authorization")
+		if len(values) == 1 {
+			scheme, value, ok := strings.Cut(values[0], " ")
+			if ok && strings.EqualFold(scheme, "Bearer") && !strings.ContainsAny(value, " \t\r\n,") {
+				token = value
+			}
+		}
+		if token == "" {
+			return jsonResponse(req, 401, errorMessage("authentication_error", "требуется клиентский OAuth Bearer OpenAI")), nil
+		}
+	} else {
+		if a.AccessToken == nil {
+			return jsonResponse(req, 503, errorMessage("api_error", "профиль ChatGPT недоступен")), nil
+		}
+		token, err = a.AccessToken(req.Context(), target.Profile)
+		if err != nil {
+			return jsonResponse(req, 503, errorMessage("api_error", "профиль ChatGPT недоступен, проверьте локальный вход")), nil
+		}
 	}
 	out, err := http.NewRequestWithContext(req.Context(), http.MethodPost, config.OpenAIResponsesURL, bytes.NewReader(payload))
 	if err != nil {

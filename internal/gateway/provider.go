@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/seredavin/claude-proxy/internal/config"
 	"github.com/seredavin/claude-proxy/internal/responses"
 	"github.com/seredavin/claude-proxy/internal/trace"
 )
@@ -37,4 +38,19 @@ func (t providerTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		}
 	}
 	return t.openAI.RoundTrip(req, rt.openAI, hooks)
+}
+
+func (g *Gateway) serveChatGPTRefresh(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	label, ok := g.tokens.Lookup(r.Header.Get("X-Gateway-Key"))
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication_error", "invalid gateway key")
+		return
+	}
+	rt := g.routeFor(label)
+	if r.TLS == nil || g.mode != config.ModeOAuth || rt.openAI == nil || !rt.openAI.ClientOAuth {
+		writeError(w, http.StatusForbidden, "permission_error", "OAuth refresh недоступен для этого маршрута")
+		return
+	}
+	g.refreshRelay.ServeHTTP(w, r)
 }

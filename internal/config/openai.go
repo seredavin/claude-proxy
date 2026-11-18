@@ -11,9 +11,10 @@ const OpenAIResponsesURL = "https://api.openai.com/v1/responses"
 
 // OpenAITarget задаёт локальный профиль и модель Responses API.
 type OpenAITarget struct {
-	Profile string
-	Model   string
-	Models  []OpenAIModel
+	Profile     string
+	ClientOAuth bool
+	Model       string
+	Models      []OpenAIModel
 }
 
 type OpenAIModel struct {
@@ -54,18 +55,22 @@ var modelID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 func parseOpenAITarget(value string) (*OpenAITarget, error) {
 	profile, models, ok := strings.Cut(strings.TrimSpace(value), ":")
 	profile, models = strings.TrimSpace(profile), strings.TrimSpace(models)
-	if !ok || !ValidProfileName(profile) || models == "" {
+	clientOAuth := profile == "@client"
+	if !ok || (!clientOAuth && !ValidProfileName(profile)) || models == "" {
 		return nil, fmt.Errorf("ожидается профиль:модель или профиль:псевдоним=модель|псевдоним=модель")
+	}
+	if clientOAuth {
+		profile = ""
 	}
 	if !strings.ContainsAny(models, "=|") {
 		// Сохраняем формат уже настроенной фиксированной модели.
 		if strings.ContainsAny(models, " \t\r\n,:") {
 			return nil, fmt.Errorf("ожидается профиль:модель")
 		}
-		return &OpenAITarget{Profile: profile, Model: models}, nil
+		return &OpenAITarget{Profile: profile, ClientOAuth: clientOAuth, Model: models}, nil
 	}
 
-	target := &OpenAITarget{Profile: profile}
+	target := &OpenAITarget{Profile: profile, ClientOAuth: clientOAuth}
 	seen := make(map[string]bool)
 	for i, entry := range strings.Split(models, "|") {
 		alias, model, ok := strings.Cut(entry, "=")
@@ -113,6 +118,9 @@ func (c *Config) configureOpenAI(raw Raw) error {
 		if err != nil {
 			return fmt.Errorf("--openai-upstream: %w", err)
 		}
+		if err := c.validateOpenAICredentials(target); err != nil {
+			return err
+		}
 		c.OpenAI = target
 		c.Upstream = endpoint
 	}
@@ -140,6 +148,9 @@ func (c *Config) configureOpenAI(raw Raw) error {
 		if err != nil {
 			return fmt.Errorf("--openai-routes, метка %q: %w", label, err)
 		}
+		if err := c.validateOpenAICredentials(target); err != nil {
+			return err
+		}
 		delete(labels, label)
 		c.Routes = append(c.Routes, Route{Label: label, Upstream: endpoint, OpenAI: target})
 	}
@@ -157,4 +168,14 @@ func (c *Config) HasOpenAI() bool {
 		}
 	}
 	return false
+}
+
+// ChatGPTRefreshPath используется только для обновления через TLS-шлюз.
+const ChatGPTRefreshPath = "/_claude_proxy/chatgpt/refresh"
+
+func (c *Config) validateOpenAICredentials(target *OpenAITarget) error {
+	if target.ClientOAuth && (c.Mode != ModeOAuth || c.TLS == TLSNone) {
+		return fmt.Errorf("@client для OpenAI требует TLS и режим oauth на внешнем шлюзе")
+	}
+	return nil
 }
