@@ -71,6 +71,14 @@ func (g *Gateway) logAccess(rec *recorder, r *http.Request, start time.Time, tok
 	if tokenLabel != "" {
 		attrs = append(attrs, "token", tokenLabel)
 	}
+	// С маршрутами одного имени метки мало: в логе нужен хост апстрима,
+	// который обслужил запрос. Без маршрутов контекст маршрута пуст и
+	// формат строки прежний.
+	var upstreamHost string
+	if rt := routeFromContext(r.Context()); rt != nil {
+		upstreamHost = rt.upstream.Host
+		attrs = append(attrs, "upstream", upstreamHost)
+	}
 	// Только счётчики: ни значений, ни суррогатов.
 	if rec.mask != nil {
 		st := rec.mask.counters()
@@ -98,6 +106,7 @@ func (g *Gateway) logAccess(rec *recorder, r *http.Request, start time.Time, tok
 			Path:            r.URL.Path,
 			Status:          rec.status,
 			Token:           tokenLabel,
+			Upstream:        upstreamHost,
 			RequestHeaders:  rec.trace.requestHeaders,
 			UpstreamHeaders: rec.trace.upstreamHeaders,
 		}

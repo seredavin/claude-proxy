@@ -43,6 +43,27 @@ func TestEnvLinesWritesUpstreamKey(t *testing.T) {
 	}
 }
 
+func TestEnvLinesWritesUpstreamRoutes(t *testing.T) {
+	raw := config.Defaults()
+	raw.Tokens = "team-a:abc,team-b:def"
+	raw.UpstreamRoutes = "team-a=https://edge-a.example.com:9443,team-b=https://edge-b.example.com:9443"
+	raw.UpstreamRouteKeys = "team-a=secret-a"
+
+	lines := strings.Join(envLines(raw), "\n")
+
+	if !strings.Contains(lines, `CLAUDE_PROXY_UPSTREAM_ROUTES="team-a=https://edge-a.example.com:9443,team-b=https://edge-b.example.com:9443"`) {
+		t.Errorf("маршруты не попали в файл:\n%s", lines)
+	}
+	if !strings.Contains(lines, `CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS="team-a=secret-a"`) {
+		t.Errorf("пропуска маршрутов не попали в файл:\n%s", lines)
+	}
+
+	empty := strings.Join(envLines(config.Defaults()), "\n")
+	if strings.Contains(empty, "CLAUDE_PROXY_UPSTREAM_ROUTES") || strings.Contains(empty, "CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS") {
+		t.Errorf("пустые маршруты не должны попадать в файл:\n%s", empty)
+	}
+}
+
 func TestForeignEnvLinesSurviveReinstall(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "claude-proxy.env")
 	content := strings.Join([]string{

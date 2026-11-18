@@ -142,12 +142,15 @@ func (w *ResponseWriter) Write(p []byte) (int, error) {
 
 // Meta — сводка запроса для meta.json.
 type Meta struct {
-	Started        time.Time         `json:"started"`
-	DurationMs     int64             `json:"duration_ms"`
-	Method         string            `json:"method"`
-	Path           string            `json:"path"`
-	Status         int               `json:"status"`
-	Token          string            `json:"token,omitempty"`
+	Started    time.Time `json:"started"`
+	DurationMs int64     `json:"duration_ms"`
+	Method     string    `json:"method"`
+	Path       string    `json:"path"`
+	Status     int       `json:"status"`
+	Token      string    `json:"token,omitempty"`
+	// Upstream — хост апстрима, обслужившего запрос; заполняется при
+	// заданных маршрутах, чтобы трассу нельзя было перепутать между ними.
+	Upstream       string            `json:"upstream,omitempty"`
 	RequestHeaders map[string]string `json:"request_headers,omitempty"`
 	// UpstreamHeaders — заголовки ответа апстрима; nil, если апстрим не вызывался.
 	UpstreamHeaders map[string]string `json:"upstream_headers,omitempty"`

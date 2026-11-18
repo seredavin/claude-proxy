@@ -17,6 +17,8 @@ EDGE_PORT=${EDGE_PORT:-19444}   # звено B, у интернета
 INNER_PORT=${INNER_PORT:-19443} # звено A, внутреннее
 EDGE_TOKEN=edge-token
 INNER_TOKEN=inner-token
+ROUTED_TOKEN=routed-token
+ROUTE_KEY=route-edge-token
 
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "SKIP: проверка требует Linux (SSL_CERT_FILE работает только там)"
@@ -168,7 +170,8 @@ wait_stub
 echo "==> Звено B (oauth) на :$EDGE_PORT"
 "$BIN" run --tls files \
     --cert-file "$WORK/fullchain.pem" --key-file "$WORK/privkey.pem" \
-    --mode oauth --listen "127.0.0.1:$EDGE_PORT" --tokens "edge:$EDGE_TOKEN" \
+    --mode oauth --listen "127.0.0.1:$EDGE_PORT" \
+    --tokens "edge:$EDGE_TOKEN,routed-edge:$ROUTE_KEY" \
     --upstream "https://127.0.0.1:$STUB_PORT" >"$WORK/edge.log" 2>&1 &
 EDGE_PID=$!
 hush
@@ -196,5 +199,20 @@ code=$(request -H "Authorization: Bearer $INNER_TOKEN")
 want_header sk-ant-api03-smoke
 deny_header authorization
 echo "    ok ключ Console внутреннего звена дошёл через внешнее"
+
+echo "--> маршрут по метке токена"
+# Общий пропуск намеренно неверный: 200 по маршруту докажет, что наверх
+# ушёл именно ключ маршрута, а не общий.
+start_inner inner-routed --mode oauth --upstream-key wrong-token \
+    --tokens "client:$INNER_TOKEN,routed:$ROUTED_TOKEN" \
+    --upstream-routes "routed=https://127.0.0.1:$EDGE_PORT" \
+    --upstream-route-keys "routed=$ROUTE_KEY"
+code=$(request -H "X-Gateway-Key: $ROUTED_TOKEN" -H "Authorization: Bearer sk-ant-oat01-smoke")
+[[ "$code" == 200 ]] || fail "код $code вместо 200: $(cat "$WORK/body")"
+want_header sk-ant-oat01-smoke
+echo "    ok ключ маршрута принят звеном B при неверном общем"
+code=$(request -H "X-Gateway-Key: $INNER_TOKEN" -H "Authorization: Bearer sk-ant-oat01-smoke")
+[[ "$code" == 401 ]] || fail "код $code вместо 401: запрос без маршрута обязан идти с общим пропуском"
+echo "    ok токен без маршрута идёт с общим пропуском"
 
 echo "==> Цепочка работает"

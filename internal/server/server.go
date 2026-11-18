@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/seredavin/claude-proxy/internal/config"
@@ -77,6 +78,7 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 		APIKey:       cfg.APIKey,
 		Upstream:     cfg.Upstream,
 		UpstreamKey:  cfg.UpstreamKey,
+		Routes:       cfg.Routes,
 		MaxBodyBytes: cfg.MaxBodyBytes,
 		Logger:       log,
 		Masker:       masker,
@@ -144,6 +146,16 @@ func RunReady(ctx context.Context, cfg *config.Config, log *slog.Logger, ready f
 		"tls", provider.Description,
 		"tokens", cfg.Tokens.Labels(),
 	)
+
+	// Маршруты перечисляем отдельно: это соответствие «метка → хост», без
+	// него строку запуска не прочитать. Пропусков здесь нет умышленно.
+	if len(cfg.Routes) > 0 {
+		pairs := make([]string, 0, len(cfg.Routes))
+		for _, rt := range cfg.Routes {
+			pairs = append(pairs, rt.Label+"="+rt.Upstream.Host)
+		}
+		log.Info("маршруты апстримов включены", "routes", strings.Join(pairs, ","))
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {
