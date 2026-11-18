@@ -38,6 +38,7 @@ type block struct {
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
 	ToolUseID string          `json:"tool_use_id"`
+	ToolName  string          `json:"tool_name"`
 	Content   json.RawMessage `json:"content"`
 	IsError   bool            `json:"is_error"`
 }
@@ -59,17 +60,25 @@ func contentBlocks(raw json.RawMessage) ([]block, error) {
 	return blocks, nil
 }
 
-func blockText(raw json.RawMessage) (string, error) {
+func blockText(raw json.RawMessage, allowToolReferences bool) (string, error) {
 	blocks, err := contentBlocks(raw)
 	if err != nil {
 		return "", err
 	}
 	var lines []string
 	for _, b := range blocks {
-		if b.Type != "text" {
+		switch {
+		case b.Type == "text":
+			lines = append(lines, b.Text)
+		case allowToolReferences && b.Type == "tool_reference":
+			if strings.TrimSpace(b.ToolName) == "" {
+				return "", fmt.Errorf("в блоке tool_reference отсутствует tool_name")
+			}
+			// Схемы найденных инструментов передаются отдельно из tools.
+			lines = append(lines, fmt.Sprintf("Found tool: %q", b.ToolName))
+		default:
 			return "", fmt.Errorf("поддерживаются только текстовые блоки")
 		}
-		lines = append(lines, b.Text)
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -83,7 +92,7 @@ func convertRequest(body []byte, target *config.OpenAITarget) (messageRequest, [
 	if !ok {
 		return client, nil, fmt.Errorf("модель не разрешена для этого маршрута, используйте /v1/models")
 	}
-	instructions, err := blockText(client.System)
+	instructions, err := blockText(client.System, false)
 	if err != nil {
 		return client, nil, err
 	}
@@ -91,7 +100,7 @@ func convertRequest(body []byte, target *config.OpenAITarget) (messageRequest, [
 	for _, msg := range client.Messages {
 		// Claude Code может добавлять системные инструкции в историю.
 		if msg.Role == "system" {
-			text, err := blockText(msg.Content)
+			text, err := blockText(msg.Content, false)
 			if err != nil {
 				return client, nil, err
 			}
@@ -134,7 +143,7 @@ func convertRequest(body []byte, target *config.OpenAITarget) (messageRequest, [
 				if msg.Role != "user" || b.ToolUseID == "" {
 					return client, nil, fmt.Errorf("некорректный блок tool_result")
 				}
-				output, err := blockText(b.Content)
+				output, err := blockText(b.Content, true)
 				if err != nil {
 					return client, nil, err
 				}
