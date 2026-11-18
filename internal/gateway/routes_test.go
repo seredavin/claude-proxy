@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/seredavin/claude-proxy/internal/auth"
 	"github.com/seredavin/claude-proxy/internal/config"
@@ -22,6 +21,10 @@ import (
 func routeUpstream(t *testing.T, echo *upstreamEcho) *url.URL {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		addr := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+		if r.Host != addr.String() {
+			t.Errorf("Host = %q, ожидался адрес апстрима %q", r.Host, addr)
+		}
 		echo.gotHeader = r.Header.Clone()
 		echo.gotHost = r.Host
 		w.WriteHeader(http.StatusOK)
@@ -185,51 +188,31 @@ func TestМаршрутПишетХостАпстримаВТрассу(t *testi
 	do(t, front, http.MethodPost, "/v1/messages", routedHeader(config.ModeOAuth, "BBB"), `{}`)
 	do(t, front, http.MethodPost, "/v1/messages", routedHeader(config.ModeOAuth, "AAA"), `{}`)
 
-	// Ждём обе трассы: meta.json пишется после того, как клиент дочитал ответ.
-	var metas []string
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		entries, err := os.ReadDir(dir)
+	// Close дожидается обработчиков, которые записывают трассу после ответа.
+	front.Close()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("в каталоге %d meta.json вместо 2", len(paths))
+	}
+	wantHost := map[string]string{"routed": rtURL.Host, "plain": defURL.Host}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		metas = metas[:0]
-		for _, e := range entries {
-			if strings.HasSuffix(e.Name(), ".meta.json") {
-				b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-				if err != nil {
-					t.Fatal(err)
-				}
-				metas = append(metas, string(b))
-			}
-		}
-		if len(metas) == 2 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if len(metas) != 2 {
-		t.Fatalf("в каталоге %d meta.json вместо 2", len(metas))
-	}
-
-	// У метки с маршрутом в meta.json хост апстрима маршрута, у метки без
-	// маршрута — общий.
-	gotRoute, gotDefault := false, false
-	for _, content := range metas {
-		var meta struct {
-			Upstream string `json:"upstream"`
-		}
-		if err := json.Unmarshal([]byte(content), &meta); err != nil {
+		var meta trace.Meta
+		if err := json.Unmarshal(content, &meta); err != nil {
 			t.Fatal(err)
 		}
-		switch meta.Upstream {
-		case rtURL.Host:
-			gotRoute = true
-		case defURL.Host:
-			gotDefault = true
+		if host, ok := wantHost[meta.Token]; !ok || meta.Upstream != host {
+			t.Errorf("неожиданные метка %q и апстрим %q в трассе", meta.Token, meta.Upstream)
 		}
-	}
-	if !gotRoute || !gotDefault {
-		t.Errorf("meta.json не различает апстримы (маршрут=%v общий=%v)", gotRoute, gotDefault)
+		delete(wantHost, meta.Token)
+		if got := meta.RequestHeaders["X-Gateway-Key"]; got != "<redacted>" {
+			t.Errorf("X-Gateway-Key в трассе: %q", got)
+		}
 	}
 }

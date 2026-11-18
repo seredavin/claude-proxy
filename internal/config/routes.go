@@ -44,8 +44,7 @@ func parseRoutes(routesSpec, keysSpec string, tokens auth.Set) ([]Route, error) 
 		if item == "" {
 			continue
 		}
-		// Делим по первому «=»: в адресе маршрута «=» допустим (query),
-		// в метке и пропуске — нет.
+		// Первое «=» отделяет метку от значения, в том числе от URL с query.
 		label, value, found := strings.Cut(item, "=")
 		label, value = strings.TrimSpace(label), strings.TrimSpace(value)
 		if !found || label == "" || value == "" {
@@ -62,8 +61,8 @@ func parseRoutes(routesSpec, keysSpec string, tokens auth.Set) ([]Route, error) 
 		if err != nil {
 			return nil, fmt.Errorf("некорректный апстрим маршрута %q: %w", item, err)
 		}
-		if upstream.Scheme != "https" || upstream.Host == "" {
-			return nil, fmt.Errorf("апстрим маршрута должен быть https://host, получено %q", value)
+		if upstream.Scheme != "https" || upstream.Hostname() == "" {
+			return nil, fmt.Errorf("апстрим маршрута для метки %q должен быть https://host", label)
 		}
 		routes = append(routes, Route{Label: label, Upstream: upstream})
 	}
@@ -73,7 +72,7 @@ func parseRoutes(routesSpec, keysSpec string, tokens auth.Set) ([]Route, error) 
 		byLabel[routes[i].Label] = &routes[i]
 	}
 	seenKeys := map[string]bool{}
-	for _, raw := range strings.Split(keysSpec, ",") {
+	for i, raw := range strings.Split(keysSpec, ",") {
 		item := strings.TrimSpace(raw)
 		if item == "" {
 			continue
@@ -81,7 +80,7 @@ func parseRoutes(routesSpec, keysSpec string, tokens auth.Set) ([]Route, error) 
 		label, value, found := strings.Cut(item, "=")
 		label, value = strings.TrimSpace(label), strings.TrimSpace(value)
 		if !found || label == "" || value == "" {
-			return nil, fmt.Errorf("ключ маршрута %q должен иметь вид метка=значение", item)
+			return nil, fmt.Errorf("элемент %d в --upstream-route-keys должен иметь вид метка=значение", i+1)
 		}
 		if seenKeys[label] {
 			return nil, fmt.Errorf("ключ маршрута для метки %q встречается дважды", label)

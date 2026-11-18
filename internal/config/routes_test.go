@@ -94,6 +94,10 @@ func TestОшибкиМаршрутов(t *testing.T) {
 			"CLAUDE_PROXY_TOKENS":          "a:AAA",
 			"CLAUDE_PROXY_UPSTREAM_ROUTES": "a=http://edge.example.com:9443",
 		}, "https://host"},
+		{"порт без хоста", map[string]string{
+			"CLAUDE_PROXY_TOKENS":          "a:AAA",
+			"CLAUDE_PROXY_UPSTREAM_ROUTES": "a=https://:9443",
+		}, "https://host"},
 		{"элемент без метки", map[string]string{
 			"CLAUDE_PROXY_TOKENS":          "a:AAA",
 			"CLAUDE_PROXY_UPSTREAM_ROUTES": "https://edge.example.com:9443",
@@ -129,5 +133,20 @@ func TestОшибкиМаршрутов(t *testing.T) {
 				t.Errorf("ошибка %q не содержит %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestОшибкаФорматаНеРаскрываетКлючМаршрута(t *testing.T) {
+	const secret = "secret-route-token"
+	for _, input := range []string{secret, "=" + secret} {
+		env := routeEnv()
+		env["CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS"] = input
+		_, _, err := load(t, routeArgs, env)
+		if err == nil {
+			t.Fatalf("ожидался отказ для %q", input)
+		}
+		if !strings.Contains(err.Error(), "--upstream-route-keys") || strings.Contains(err.Error(), secret) {
+			t.Errorf("ожидалась диагностика формата без значения ключа, получено: %v", err)
+		}
 	}
 }

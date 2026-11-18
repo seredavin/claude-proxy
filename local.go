@@ -38,8 +38,9 @@ func cmdLocal(args []string) error {
 переменными на это звено и гасит звено по выходу claude. Всё после флагов
 (или после --) уходит claude как есть.
 
-Обязательны --upstream и --upstream-key (адрес и пропуск внешнего звена) и,
-в режиме oauth, ANTHROPIC_AUTH_TOKEN в окружении или файле настроек.
+Для внешнего звена задайте --upstream и --upstream-key либо
+--upstream-routes и --upstream-route-keys для метки первого токена.
+В режиме oauth нужен ANTHROPIC_AUTH_TOKEN в окружении или файле настроек.
 
 Флаги:
 `)
@@ -134,26 +135,17 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 	}
 	plan.token = first.Value
 	if rt := routeForLabel(cfg.Routes, first.Label); rt != nil {
-		plan.upstream = rt.Upstream.String()
-		// Маршрут с ключом тоже означает цепочку: запрос токена звена уходит
-		// на внешнее звено с его пропуском.
-		if rt.Key != "" {
-			return planWithClaude(plan, getenv, lookPath, claude)
+		plan.upstream = rt.Upstream.Host
+		if rt.Key == "" {
+			return nil, fmt.Errorf("локальное звено работает только в цепочке: задайте --upstream-route-keys "+
+				"или CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS для маршрута метки %q", first.Label)
 		}
-	}
-	if cfg.UpstreamKey == "" {
+	} else if cfg.UpstreamKey == "" {
 		return nil, errors.New("локальное звено работает только в цепочке: задайте адрес и пропуск внешнего звена " +
 			"(--upstream и --upstream-key, или --upstream-routes и --upstream-route-keys для метки " +
 			strconv.Quote(first.Label) + "; переменные CLAUDE_PROXY_* — в файле настроек)")
 	}
-	return planWithClaude(plan, getenv, lookPath, claude)
-}
-
-// planWithClaude достраивает план тем, что не зависит от апстрима: токеном
-// подписки и поиском исполняемого файла claude.
-func planWithClaude(plan *localPlan, getenv config.Getenv,
-	lookPath func(string) (string, error), claude string) (*localPlan, error) {
-	if plan.cfg.Mode == config.ModeOAuth {
+	if cfg.Mode == config.ModeOAuth {
 		plan.authToken = getenv("ANTHROPIC_AUTH_TOKEN")
 		if plan.authToken == "" {
 			return nil, errors.New("нет токена подписки: задайте ANTHROPIC_AUTH_TOKEN в окружении или файле настроек " +

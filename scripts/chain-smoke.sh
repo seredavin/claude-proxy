@@ -201,18 +201,21 @@ deny_header authorization
 echo "    ok ключ Console внутреннего звена дошёл через внешнее"
 
 echo "--> маршрут по метке токена"
-# Общий пропуск намеренно неверный: 200 по маршруту докажет, что наверх
-# ушёл именно ключ маршрута, а не общий.
-start_inner inner-routed --mode oauth --upstream-key wrong-token \
+# Общий апстрим — заглушка, маршрут ведёт через звено B с отдельным ключом.
+start_inner inner-routed --mode oauth --upstream-key "$EDGE_TOKEN" \
     --tokens "client:$INNER_TOKEN,routed:$ROUTED_TOKEN" \
+    --upstream "https://127.0.0.1:$STUB_PORT" \
     --upstream-routes "routed=https://127.0.0.1:$EDGE_PORT" \
     --upstream-route-keys "routed=$ROUTE_KEY"
 code=$(request -H "X-Gateway-Key: $ROUTED_TOKEN" -H "Authorization: Bearer sk-ant-oat01-smoke")
 [[ "$code" == 200 ]] || fail "код $code вместо 200: $(cat "$WORK/body")"
 want_header sk-ant-oat01-smoke
-echo "    ok ключ маршрута принят звеном B при неверном общем"
+deny_header x-gateway-key
+echo "    ok запрос по маршруту прошёл через звено B"
 code=$(request -H "X-Gateway-Key: $INNER_TOKEN" -H "Authorization: Bearer sk-ant-oat01-smoke")
-[[ "$code" == 401 ]] || fail "код $code вместо 401: запрос без маршрута обязан идти с общим пропуском"
-echo "    ok токен без маршрута идёт с общим пропуском"
+[[ "$code" == 200 ]] || fail "код $code вместо 200: $(cat "$WORK/body")"
+want_header sk-ant-oat01-smoke
+want_header "\"x-gateway-key\": \"$EDGE_TOKEN\""
+echo "    ok токен без маршрута идёт напрямую на общий апстрим со своим пропуском"
 
 echo "==> Цепочка работает"
