@@ -24,6 +24,7 @@ import (
 	"github.com/seredavin/claude-proxy/internal/auth"
 	"github.com/seredavin/claude-proxy/internal/config"
 	"github.com/seredavin/claude-proxy/internal/mask"
+	"github.com/seredavin/claude-proxy/internal/responses"
 	"github.com/seredavin/claude-proxy/internal/trace"
 )
 
@@ -47,7 +48,10 @@ type Options struct {
 	Upstream *url.URL
 	// UpstreamKey — пропуск на следующий шлюз цепочки. Пусто — апстрим
 	// Anthropic, подставлять нечего.
-	UpstreamKey string
+	UpstreamKey       string
+	OpenAI            *config.OpenAITarget
+	ChatGPTToken      func(context.Context, string) (string, error)
+	ChatGPTChainLabel string
 	// Routes — маршруты апстримов по меткам токенов: запрос метки уходит на
 	// свой апстрим со своим пропуском. nil — все запросы на Upstream.
 	Routes       []config.Route
@@ -68,11 +72,13 @@ type Options struct {
 
 // Gateway — http.Handler шлюза.
 type Gateway struct {
-	mode        config.Mode
-	tokens      auth.Set
-	apiKey      string
-	upstream    *url.URL
-	upstreamKey string
+	mode              config.Mode
+	tokens            auth.Set
+	apiKey            string
+	upstream          *url.URL
+	upstreamKey       string
+	openAI            *config.OpenAITarget
+	chatGPTChainLabel string
 	// routes — апстримы по меткам токенов; nil — маршрутов нет, и все
 	// запросы идут на upstream с upstreamKey.
 	routes  map[string]route
@@ -87,6 +93,7 @@ type Gateway struct {
 
 // route — адрес и пропуск одного апстрима: маршрута по метке или общего.
 type route struct {
+	openAI   *config.OpenAITarget
 	upstream *url.URL
 	key      string
 }
@@ -113,22 +120,30 @@ func New(opts Options) *Gateway {
 	}
 
 	g := &Gateway{
-		mode:        opts.Mode,
-		tokens:      opts.Tokens,
-		apiKey:      opts.APIKey,
-		upstream:    opts.Upstream,
-		upstreamKey: opts.UpstreamKey,
-		maxBody:     opts.MaxBodyBytes,
-		log:         opts.Logger,
-		masker:      opts.Masker,
-		maskOnError: opts.MaskOnError,
-		tracer:      opts.Tracer,
+		mode:              opts.Mode,
+		tokens:            opts.Tokens,
+		apiKey:            opts.APIKey,
+		upstream:          opts.Upstream,
+		upstreamKey:       opts.UpstreamKey,
+		openAI:            opts.OpenAI,
+		chatGPTChainLabel: opts.ChatGPTChainLabel,
+		maxBody:           opts.MaxBodyBytes,
+		log:               opts.Logger,
+		masker:            opts.Masker,
+		maskOnError:       opts.MaskOnError,
+		tracer:            opts.Tracer,
 	}
 	if len(opts.Routes) > 0 {
 		g.routes = make(map[string]route, len(opts.Routes))
 		for _, rt := range opts.Routes {
-			g.routes[rt.Label] = route{upstream: rt.Upstream, key: rt.Key}
+			g.routes[rt.Label] = route{upstream: rt.Upstream, key: rt.Key, openAI: rt.OpenAI}
 		}
+	}
+
+	if opts.OpenAI != nil || len(opts.Routes) != 0 {
+		transport = providerTransport{base: transport, openAI: responses.Adapter{
+			Transport: transport, AccessToken: opts.ChatGPTToken,
+		}}
 	}
 
 	g.proxy = &httputil.ReverseProxy{
@@ -136,6 +151,9 @@ func New(opts Options) *Gateway {
 			// Маршрут уже выбран по метке токена в ServeHTTP; без маршрутов
 			// (или для метки без маршрута) действует общий апстрим.
 			rt := routeFromContext(pr.In.Context())
+			if rt != nil && rt.openAI != nil {
+				return
+			}
 			target, key := opts.Upstream, opts.UpstreamKey
 			if rt != nil {
 				target, key = rt.upstream, rt.key
@@ -236,9 +254,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if g.isChatGPTChain(label) {
+		r.Header.Del("Authorization")
+		r.Header.Del("X-Api-Key")
+	}
+
 	// Маршрут выбирается по метке сработавшего токена. Без маршрутов
 	// контекст не трогаем: Rewrite берёт общий апстрим, формат логов прежний.
-	if g.routes != nil {
+	if g.routes != nil || g.openAI != nil {
 		r = r.WithContext(context.WithValue(r.Context(), routeKey{}, g.routeFor(label)))
 	}
 
@@ -281,7 +304,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	setBody(r, body)
-	if rec.trace != nil {
+	if rec.trace != nil && !isOpenAIRequest(r) {
 		rec.trace.rec.WriteRequest(trace.Upstream, body)
 	}
 
@@ -295,7 +318,7 @@ func (g *Gateway) routeFor(label string) *route {
 	if rt, ok := g.routes[label]; ok && label != "" {
 		return &rt
 	}
-	return &route{upstream: g.upstream, key: g.upstreamKey}
+	return &route{upstream: g.upstream, key: g.upstreamKey, openAI: g.openAI}
 }
 
 // traceStateKey — ключ контекста, по которому Rewrite и ModifyResponse
@@ -398,7 +421,7 @@ func (g *Gateway) maskBody(w http.ResponseWriter, state *maskState, body []byte)
 // modifyResponse — трасса ответа апстрима (до демаскирования, байт в байт),
 // затем демаскирование.
 func (g *Gateway) modifyResponse(resp *http.Response) error {
-	if ts, _ := resp.Request.Context().Value(traceStateKey{}).(*traceState); ts != nil {
+	if ts, _ := resp.Request.Context().Value(traceStateKey{}).(*traceState); ts != nil && !isOpenAIRequest(resp.Request) {
 		ts.upstreamHeaders = trace.Headers(resp.Header)
 		resp.Body = readCloser{
 			Reader: io.TeeReader(resp.Body, ts.rec.ResponseWriter(trace.Upstream)),
@@ -477,7 +500,7 @@ func (g *Gateway) authorize(w http.ResponseWriter, r *http.Request) (label strin
 		// а его 401 клиент трактует как недоступность шлюза. X-Api-Key тоже
 		// считается credential'ом — его подставляет предыдущее звено цепочки,
 		// работающее в режиме apikey.
-		if r.Header.Get("Authorization") == "" && r.Header.Get("X-Api-Key") == "" {
+		if !g.isChatGPTChain(label) && g.routeFor(label).openAI == nil && r.Header.Get("Authorization") == "" && r.Header.Get("X-Api-Key") == "" {
 			writeError(w, http.StatusUnauthorized, "authentication_error", "missing oauth token")
 			return label, false
 		}
@@ -533,4 +556,8 @@ func writeError(w http.ResponseWriter, status int, kind, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":%q,"message":%q}}`+"\n", kind, message)
+}
+
+func (g *Gateway) isChatGPTChain(label string) bool {
+	return label != "" && label == g.chatGPTChainLabel
 }

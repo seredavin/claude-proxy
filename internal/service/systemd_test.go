@@ -151,3 +151,18 @@ func TestEnvValueПониматьСтарыйФормат(t *testing.T) {
 		t.Errorf("envValue вернул %q для отсутствующего ключа", got)
 	}
 }
+
+func TestEnvLinesWritesOpenAITargets(t *testing.T) {
+	raw := config.Defaults()
+	raw.OpenAIUpstream = "personal:gpt-main"
+	raw.OpenAIRoutes = "openai=work:gpt-route"
+	lines := strings.Join(envLines(raw), "\n")
+	for _, entry := range []string{
+		`CLAUDE_PROXY_OPENAI_UPSTREAM="personal:gpt-main"`,
+		`CLAUDE_PROXY_OPENAI_ROUTES="openai=work:gpt-route"`,
+	} {
+		if !strings.Contains(lines, entry) {
+			t.Errorf("в EnvironmentFile отсутствует %q", entry)
+		}
+	}
+}

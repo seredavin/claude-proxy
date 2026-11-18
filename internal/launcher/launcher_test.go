@@ -409,3 +409,29 @@ func TestEnvironРежимAPIKeyНеТрогаетТокенПодписки(t *
 		t.Errorf("чужие переменные сохраняются:\n%s", joined)
 	}
 }
+
+func TestEnvironDiscoversModelsForSelectedOpenAIRoute(t *testing.T) {
+	tokens, err := auth.Parse("gpt:gpt-token,claude:claude-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Mode: config.ModeOAuth, Listen: "127.0.0.1:9443", TLS: config.TLSNone, Tokens: tokens,
+		Routes: []config.Route{{Label: "gpt", OpenAI: &config.OpenAITarget{Profile: "test", Model: "gpt-test"}}},
+	}
+	const discovery = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="
+	base := []string{discovery + "0"}
+	check := func(token, want string) {
+		t.Helper()
+		env := strings.Join(Environ(base, cfg, token, "pass"), "\n")
+		if !strings.Contains(env, discovery+want) || strings.Count(env, discovery) != 1 {
+			t.Errorf("неожиданная настройка обнаружения моделей для %s", token)
+		}
+	}
+	check("gpt-token", "1")
+	check("claude-token", "0")
+	cfg.Routes = nil
+	cfg.ChatGPTChainLabel = "gpt"
+	check("gpt-token", "1")
+	check("claude-token", "0")
+}

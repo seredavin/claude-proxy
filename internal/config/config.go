@@ -81,7 +81,9 @@ type Config struct {
 
 	// UpstreamKey — пропуск на следующий шлюз, когда апстрим не Anthropic,
 	// а ещё один claude-proxy. Уходит наверх в X-Gateway-Key.
-	UpstreamKey string
+	UpstreamKey       string
+	OpenAI            *OpenAITarget
+	ChatGPTChainLabel string
 
 	// Routes — маршруты апстримов по меткам токенов: запрос метки уходит
 	// на свой апстрим со своим пропуском. Пусто — все запросы на Upstream.
@@ -131,6 +133,8 @@ type Raw struct {
 	UpstreamKey       string
 	UpstreamRoutes    string
 	UpstreamRouteKeys string
+	OpenAIUpstream    string
+	OpenAIRoutes      string
 	TLS               string
 	CertFile          string
 	KeyFile           string
@@ -171,6 +175,8 @@ func (r *Raw) bindings() []binding {
 		{&r.UpstreamKey, "upstream-key", []string{"CLAUDE_PROXY_UPSTREAM_KEY"}},
 		{&r.UpstreamRoutes, "upstream-routes", []string{"CLAUDE_PROXY_UPSTREAM_ROUTES"}},
 		{&r.UpstreamRouteKeys, "upstream-route-keys", []string{"CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS"}},
+		{&r.OpenAIUpstream, "openai-upstream", []string{"CLAUDE_PROXY_OPENAI_UPSTREAM"}},
+		{&r.OpenAIRoutes, "openai-routes", []string{"CLAUDE_PROXY_OPENAI_ROUTES"}},
 		{&r.TLS, "tls", []string{"CLAUDE_PROXY_TLS"}},
 		{&r.CertFile, "cert-file", []string{"CLAUDE_PROXY_CERT_FILE", "PROXY_SSL_CERT"}},
 		{&r.KeyFile, "key-file", []string{"CLAUDE_PROXY_KEY_FILE", "PROXY_SSL_KEY"}},
@@ -234,6 +240,8 @@ func Bind(fs *flag.FlagSet) *Raw {
 		`маршруты апстримов по меткам токенов: "метка=https://host" через запятую`)
 	fs.StringVar(&r.UpstreamRouteKeys, "upstream-route-keys", d.UpstreamRouteKeys,
 		`пропуска апстримов маршрутов: "метка=значение" через запятую; наверх уходят как X-Gateway-Key`)
+	fs.StringVar(&r.OpenAIUpstream, "openai-upstream", "", "общий апстрим ChatGPT, профиль:модель или профиль:псевдоним=модель|…")
+	fs.StringVar(&r.OpenAIRoutes, "openai-routes", "", "маршруты ChatGPT, метка=профиль:модель или метка=профиль:псевдоним=модель|… через запятую")
 	fs.StringVar(&r.TLS, "tls", d.TLS, "источник сертификата: auto | files | self | none (без TLS, только loopback)")
 	fs.StringVar(&r.CertFile, "cert-file", d.CertFile, "PEM с цепочкой сертификатов, для --tls files")
 	fs.StringVar(&r.KeyFile, "key-file", d.KeyFile, "PEM с приватным ключом, для --tls files")
@@ -401,6 +409,9 @@ func Resolve(r Raw) (*Config, error) {
 		return nil, err
 	}
 	c.Routes = routes
+	if err := c.configureOpenAI(r); err != nil {
+		return nil, err
+	}
 
 	size, err := parseSize(r.MaxBody)
 	if err != nil {

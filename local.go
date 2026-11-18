@@ -40,7 +40,10 @@ func cmdLocal(args []string) error {
 
 Для внешнего звена задайте --upstream и --upstream-key либо
 --upstream-routes и --upstream-route-keys для метки первого токена.
-В режиме oauth нужен ANTHROPIC_AUTH_TOKEN в окружении или файле настроек.
+Для цепочки в режиме oauth нужен ANTHROPIC_AUTH_TOKEN.
+Для OpenAI используйте claude-proxy chatgpt login и задайте
+--openai-upstream или --openai-routes. Если OpenAI настроен на внешнем
+шлюзе, используйте --upstream-chatgpt=true и пропуск этого маршрута.
 
 Флаги:
 `)
@@ -49,6 +52,7 @@ func cmdLocal(args []string) error {
 	raw := config.Bind(fs)
 	envFile := fs.String("env-file", localConfigFile(), "файл настроек; отсутствие — не ошибка")
 	claude := fs.String("claude", "claude", "исполняемый файл claude")
+	fs.String("upstream-chatgpt", "", "внешний шлюз использует ChatGPT для выбранного пропуска (true/false)")
 	logFile := fs.String("log-file", localLogFile(), "лог звена; в терминал он не пишется")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -63,25 +67,34 @@ func cmdLocal(args []string) error {
 		return err
 	}
 
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	profiles := localChatGPTStore()
+	if first, ok := plan.cfg.Tokens.First(); ok {
+		if target := plan.cfg.OpenAIFor(first.Label); target != nil {
+			if _, err := profiles.AccessToken(ctx, target.Profile); err != nil {
+				return err
+			}
+		}
+	}
+
 	log, closeLog, err := fileLogger(*logFile, plan.cfg.LogFormat)
 	if err != nil {
 		return err
 	}
 
-	ctx, stop := context.WithCancel(context.Background())
-	defer stop()
-
 	code, err := launcher.Run(ctx, launcher.Options{
-		Config:     plan.cfg,
-		Logger:     log,
-		Token:      plan.token,
-		AuthToken:  plan.authToken,
-		ClaudePath: plan.claudePath,
-		ClaudeArgs: fs.Args(),
-		Stdin:      os.Stdin,
-		Stdout:     os.Stdout,
-		Stderr:     os.Stderr,
-		Environ:    os.Environ(),
+		Config:       plan.cfg,
+		Logger:       log,
+		Token:        plan.token,
+		AuthToken:    plan.authToken,
+		ChatGPTToken: profiles.AccessToken,
+		ClaudePath:   plan.claudePath,
+		ClaudeArgs:   fs.Args(),
+		Stdin:        os.Stdin,
+		Stdout:       os.Stdout,
+		Stderr:       os.Stderr,
+		Environ:      os.Environ(),
 		Ready: func(baseURL string) {
 			fmt.Fprintf(os.Stderr, "локальное звено %s → %s, лог: %s\n", baseURL, plan.upstream, *logFile)
 		},
@@ -134,7 +147,33 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 		return nil, errors.New("набор токенов звена пуст — конфигурация не должна была пройти проверку")
 	}
 	plan.token = first.Value
-	if rt := routeForLabel(cfg.Routes, first.Label); rt != nil {
+	openAI := cfg.OpenAIFor(first.Label)
+	chainValue := getenv("CLAUDE_PROXY_UPSTREAM_CHATGPT")
+	if chainValue == "" && fs.Lookup("upstream-chatgpt") != nil {
+		chainValue = fs.Lookup("upstream-chatgpt").Value.String()
+	}
+	if chainValue != "" {
+		enabled, err := strconv.ParseBool(chainValue)
+		if err != nil {
+			return nil, fmt.Errorf("--upstream-chatgpt: ожидается true или false")
+		}
+		if enabled {
+			if openAI != nil || cfg.Mode != config.ModeOAuth {
+				return nil, fmt.Errorf("--upstream-chatgpt требует внешний шлюз и режим oauth")
+			}
+			cfg.ChatGPTChainLabel = first.Label
+			plan.authToken = plan.token
+		}
+	}
+	if openAI != nil {
+		if rt := routeForLabel(cfg.Routes, first.Label); rt != nil {
+			plan.upstream = rt.Upstream.Host
+		} else {
+			plan.upstream = cfg.Upstream.Host
+		}
+		// Claude Code получает только локальный пропуск.
+		plan.authToken = plan.token
+	} else if rt := routeForLabel(cfg.Routes, first.Label); rt != nil {
 		plan.upstream = rt.Upstream.Host
 		if rt.Key == "" {
 			return nil, fmt.Errorf("локальное звено работает только в цепочке: задайте --upstream-route-keys "+
@@ -145,7 +184,7 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 			"(--upstream и --upstream-key, или --upstream-routes и --upstream-route-keys для метки " +
 			strconv.Quote(first.Label) + "; переменные CLAUDE_PROXY_* — в файле настроек)")
 	}
-	if cfg.Mode == config.ModeOAuth {
+	if cfg.Mode == config.ModeOAuth && openAI == nil && cfg.ChatGPTChainLabel == "" {
 		plan.authToken = getenv("ANTHROPIC_AUTH_TOKEN")
 		if plan.authToken == "" {
 			return nil, errors.New("нет токена подписки: задайте ANTHROPIC_AUTH_TOKEN в окружении или файле настроек " +
