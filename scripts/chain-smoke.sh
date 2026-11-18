@@ -17,6 +17,8 @@ EDGE_PORT=${EDGE_PORT:-19444}   # звено B, у интернета
 INNER_PORT=${INNER_PORT:-19443} # звено A, внутреннее
 EDGE_TOKEN=edge-token
 INNER_TOKEN=inner-token
+ROUTED_TOKEN=routed-token
+ROUTE_KEY=route-edge-token
 
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "SKIP: проверка требует Linux (SSL_CERT_FILE работает только там)"
@@ -168,7 +170,8 @@ wait_stub
 echo "==> Звено B (oauth) на :$EDGE_PORT"
 "$BIN" run --tls files \
     --cert-file "$WORK/fullchain.pem" --key-file "$WORK/privkey.pem" \
-    --mode oauth --listen "127.0.0.1:$EDGE_PORT" --tokens "edge:$EDGE_TOKEN" \
+    --mode oauth --listen "127.0.0.1:$EDGE_PORT" \
+    --tokens "edge:$EDGE_TOKEN,routed-edge:$ROUTE_KEY" \
     --upstream "https://127.0.0.1:$STUB_PORT" >"$WORK/edge.log" 2>&1 &
 EDGE_PID=$!
 hush
@@ -196,5 +199,23 @@ code=$(request -H "Authorization: Bearer $INNER_TOKEN")
 want_header sk-ant-api03-smoke
 deny_header authorization
 echo "    ok ключ Console внутреннего звена дошёл через внешнее"
+
+echo "--> маршрут по метке токена"
+# Общий апстрим — заглушка, маршрут ведёт через звено B с отдельным ключом.
+start_inner inner-routed --mode oauth --upstream-key "$EDGE_TOKEN" \
+    --tokens "client:$INNER_TOKEN,routed:$ROUTED_TOKEN" \
+    --upstream "https://127.0.0.1:$STUB_PORT" \
+    --upstream-routes "routed=https://127.0.0.1:$EDGE_PORT" \
+    --upstream-route-keys "routed=$ROUTE_KEY"
+code=$(request -H "X-Gateway-Key: $ROUTED_TOKEN" -H "Authorization: Bearer sk-ant-oat01-smoke")
+[[ "$code" == 200 ]] || fail "код $code вместо 200: $(cat "$WORK/body")"
+want_header sk-ant-oat01-smoke
+deny_header x-gateway-key
+echo "    ok запрос по маршруту прошёл через звено B"
+code=$(request -H "X-Gateway-Key: $INNER_TOKEN" -H "Authorization: Bearer sk-ant-oat01-smoke")
+[[ "$code" == 200 ]] || fail "код $code вместо 200: $(cat "$WORK/body")"
+want_header sk-ant-oat01-smoke
+want_header "\"x-gateway-key\": \"$EDGE_TOKEN\""
+echo "    ok токен без маршрута идёт напрямую на общий апстрим со своим пропуском"
 
 echo "==> Цепочка работает"

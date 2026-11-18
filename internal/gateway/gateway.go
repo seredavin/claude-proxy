@@ -47,7 +47,10 @@ type Options struct {
 	Upstream *url.URL
 	// UpstreamKey — пропуск на следующий шлюз цепочки. Пусто — апстрим
 	// Anthropic, подставлять нечего.
-	UpstreamKey  string
+	UpstreamKey string
+	// Routes — маршруты апстримов по меткам токенов: запрос метки уходит на
+	// свой апстрим со своим пропуском. nil — все запросы на Upstream.
+	Routes       []config.Route
 	MaxBodyBytes int64
 	Logger       *slog.Logger
 
@@ -65,17 +68,38 @@ type Options struct {
 
 // Gateway — http.Handler шлюза.
 type Gateway struct {
-	mode     config.Mode
-	tokens   auth.Set
-	apiKey   string
-	upstream *url.URL
-	maxBody  int64
-	log      *slog.Logger
-	proxy    *httputil.ReverseProxy
+	mode        config.Mode
+	tokens      auth.Set
+	apiKey      string
+	upstream    *url.URL
+	upstreamKey string
+	// routes — апстримы по меткам токенов; nil — маршрутов нет, и все
+	// запросы идут на upstream с upstreamKey.
+	routes  map[string]route
+	maxBody int64
+	log     *slog.Logger
+	proxy   *httputil.ReverseProxy
 
 	masker      *mask.Registry
 	maskOnError config.MaskPolicy
 	tracer      *trace.Tracer
+}
+
+// route — адрес и пропуск одного апстрима: маршрута по метке или общего.
+type route struct {
+	upstream *url.URL
+	key      string
+}
+
+// routeKey — ключ контекста, по которому Rewrite и обработка ошибок находят
+// апстрим, выбранный по метке токена.
+type routeKey struct{}
+
+// routeFromContext достаёт маршрут из контекста; nil — маршрута нет, caller
+// берёт общий апстрим.
+func routeFromContext(ctx context.Context) *route {
+	rt, _ := ctx.Value(routeKey{}).(*route)
+	return rt
 }
 
 // New собирает шлюз.
@@ -93,18 +117,32 @@ func New(opts Options) *Gateway {
 		tokens:      opts.Tokens,
 		apiKey:      opts.APIKey,
 		upstream:    opts.Upstream,
+		upstreamKey: opts.UpstreamKey,
 		maxBody:     opts.MaxBodyBytes,
 		log:         opts.Logger,
 		masker:      opts.Masker,
 		maskOnError: opts.MaskOnError,
 		tracer:      opts.Tracer,
 	}
+	if len(opts.Routes) > 0 {
+		g.routes = make(map[string]route, len(opts.Routes))
+		for _, rt := range opts.Routes {
+			g.routes[rt.Label] = route{upstream: rt.Upstream, key: rt.Key}
+		}
+	}
 
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(opts.Upstream)
-			// SetURL не трогает заголовок Host, а Anthropic обязан увидеть свой.
-			pr.Out.Host = opts.Upstream.Host
+			// Маршрут уже выбран по метке токена в ServeHTTP; без маршрутов
+			// (или для метки без маршрута) действует общий апстрим.
+			rt := routeFromContext(pr.In.Context())
+			target, key := opts.Upstream, opts.UpstreamKey
+			if rt != nil {
+				target, key = rt.upstream, rt.key
+			}
+			pr.SetURL(target)
+			// SetURL не трогает заголовок Host, а апстрим обязан увидеть свой.
+			pr.Out.Host = target.Host
 
 			// Внутренняя топология наружу не уходит: клиентские
 			// X-Forwarded-* отбрасываем и своих не добавляем.
@@ -115,10 +153,10 @@ func New(opts Options) *Gateway {
 			// Пропуск на этот шлюз наверх не уходит ни в одном режиме: в oauth
 			// он уже проверен, в apikey — не проверялся и наверху не нужен.
 			// Если апстрим — следующее звено цепочки, вместо него подставляется
-			// его собственный пропуск.
+			// его собственный пропуск (общий или маршрута).
 			pr.Out.Header.Del("X-Gateway-Key")
-			if opts.UpstreamKey != "" {
-				pr.Out.Header.Set("X-Gateway-Key", opts.UpstreamKey)
+			if key != "" {
+				pr.Out.Header.Set("X-Gateway-Key", key)
 			}
 
 			// Демаскировать сжатый ответ нельзя. Без заголовка клиента
@@ -198,6 +236,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Маршрут выбирается по метке сработавшего токена. Без маршрутов
+	// контекст не трогаем: Rewrite берёт общий апстрим, формат логов прежний.
+	if g.routes != nil {
+		r = r.WithContext(context.WithValue(r.Context(), routeKey{}, g.routeFor(label)))
+	}
+
 	// Трасса начинается до проверки предела тела: отказ 413 тоже должен
 	// оставить meta.json и тело ответа.
 	if g.tracer != nil {
@@ -243,6 +287,15 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	g.proxy.ServeHTTP(rec, r)
 	g.logAccess(rec, r, start, label)
+}
+
+// routeFor возвращает апстрим метки: маршрут по ней или общий. Вызов имеет
+// смысл только при заданных маршрутах.
+func (g *Gateway) routeFor(label string) *route {
+	if rt, ok := g.routes[label]; ok && label != "" {
+		return &rt
+	}
+	return &route{upstream: g.upstream, key: g.upstreamKey}
 }
 
 // traceStateKey — ключ контекста, по которому Rewrite и ModifyResponse
@@ -443,9 +496,15 @@ func (g *Gateway) handleUpstreamError(w http.ResponseWriter, r *http.Request, er
 		return
 	}
 
-	g.log.Error("апстрим недоступен", "upstream", g.upstream.Host, "err", err)
+	// Апстрим недостижим — клиенту нужен хост именно того апстрима, куда
+	// запрос должен был попасть: при маршрутах это не общий адрес.
+	host := g.upstream.Host
+	if rt := routeFromContext(r.Context()); rt != nil {
+		host = rt.upstream.Host
+	}
+	g.log.Error("апстрим недоступен", "upstream", host, "err", err)
 	writeError(w, http.StatusBadGateway, "api_error",
-		"gateway could not reach "+g.upstream.Host)
+		"gateway could not reach "+host)
 }
 
 // bearerToken достаёт значение из "Bearer <token>" без учёта регистра схемы.

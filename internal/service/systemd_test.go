@@ -1,6 +1,7 @@
 package service
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,42 @@ func TestEnvLinesWritesUpstreamKey(t *testing.T) {
 
 	if !strings.Contains(lines, `CLAUDE_PROXY_UPSTREAM_KEY="next-secret"`) {
 		t.Errorf("пропуск на следующее звено не попал в файл:\n%s", lines)
+	}
+}
+
+func TestEnvLinesWritesUpstreamRoutes(t *testing.T) {
+	raw := config.Defaults()
+	raw.Tokens = "team-a:abc,team-b:def"
+	raw.UpstreamRoutes = "team-a=https://edge-a.example.com:9443,team-b=https://edge-b.example.com:9443"
+	raw.UpstreamRouteKeys = "team-a=secret-a"
+
+	lines := strings.Join(envLines(raw), "\n")
+
+	if !strings.Contains(lines, `CLAUDE_PROXY_UPSTREAM_ROUTES="team-a=https://edge-a.example.com:9443,team-b=https://edge-b.example.com:9443"`) {
+		t.Errorf("маршруты не попали в файл:\n%s", lines)
+	}
+	if !strings.Contains(lines, `CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS="team-a=secret-a"`) {
+		t.Errorf("пропуска маршрутов не попали в файл:\n%s", lines)
+	}
+
+	empty := strings.Join(envLines(config.Defaults()), "\n")
+	if strings.Contains(empty, "CLAUDE_PROXY_UPSTREAM_ROUTES") || strings.Contains(empty, "CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS") {
+		t.Errorf("пустые маршруты не должны попадать в файл:\n%s", empty)
+	}
+
+	path := filepath.Join(t.TempDir(), "claude-proxy.env")
+	if err := os.WriteFile(path, []byte(lines+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := config.LoadEnvFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	reinstalled := config.Bind(fs)
+	config.ApplyEnv(reinstalled, fs, func(key string) string { return env[key] })
+	if reinstalled.UpstreamRoutes != raw.UpstreamRoutes || reinstalled.UpstreamRouteKeys != raw.UpstreamRouteKeys {
+		t.Error("при чтении прежнего EnvironmentFile изменились настройки маршрутов")
 	}
 }
 

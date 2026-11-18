@@ -131,6 +131,35 @@ func TestPlanLocalЯвныеЗначенияСохраняются(t *testing.T)
 	}
 }
 
+func TestPlanLocalМаршрутВместоОбщегоПропуска(t *testing.T) {
+	env := map[string]string{
+		"CLAUDE_PROXY_UPSTREAM_ROUTES":     "local=https://edge.example.com:9443/base?param=value",
+		"CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS": "local=EDGE",
+		"ANTHROPIC_AUTH_TOKEN":             "sk-ant-oat01-x",
+	}
+	plan, err := planFrom(t, nil, env, true)
+	if err != nil {
+		t.Fatalf("ключ маршрута должен заменять общий пропуск: %v", err)
+	}
+	if plan.upstream != "edge.example.com:9443" {
+		t.Errorf("строка запуска должна показывать апстрим маршрута: %q", plan.upstream)
+	}
+
+	// Маршрут есть, но ключа ни у него, ни общего — цепочки нет.
+	noKey := map[string]string{
+		"CLAUDE_PROXY_UPSTREAM_ROUTES": "local=https://edge.example.com:9443",
+		"ANTHROPIC_AUTH_TOKEN":         "sk-ant-oat01-x",
+	}
+	if _, err := planFrom(t, nil, noKey, true); err == nil || !strings.Contains(err.Error(), "только в цепочке") {
+		t.Errorf("без ключа маршрута и общего пропуска ожидался отказ, получено: %v", err)
+	}
+	noKey["CLAUDE_PROXY_UPSTREAM"] = "https://default.example.com"
+	noKey["CLAUDE_PROXY_UPSTREAM_KEY"] = "DEFAULT"
+	if _, err := planFrom(t, nil, noKey, true); err == nil || !strings.Contains(err.Error(), "--upstream-route-keys") {
+		t.Errorf("ожидался отказ с подсказкой о ключе маршрута, получено: %v", err)
+	}
+}
+
 func TestPlanLocalРежимAPIKeyБезТокенаПодписки(t *testing.T) {
 	env := map[string]string{
 		"CLAUDE_PROXY_UPSTREAM":     "https://edge.example.com:9443",

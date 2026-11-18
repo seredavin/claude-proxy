@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 
 	"github.com/seredavin/claude-proxy/internal/auth"
 	"github.com/seredavin/claude-proxy/internal/config"
@@ -23,6 +24,9 @@ type localPlan struct {
 	token      string // пропуск звена, уходит claude
 	authToken  string // токен подписки, только для oauth
 	claudePath string
+	// upstream — адрес для строки запуска: маршрут метки токена звена или
+	// общий апстрим.
+	upstream string
 }
 
 func cmdLocal(args []string) error {
@@ -34,8 +38,9 @@ func cmdLocal(args []string) error {
 переменными на это звено и гасит звено по выходу claude. Всё после флагов
 (или после --) уходит claude как есть.
 
-Обязательны --upstream и --upstream-key (адрес и пропуск внешнего звена) и,
-в режиме oauth, ANTHROPIC_AUTH_TOKEN в окружении или файле настроек.
+Для внешнего звена задайте --upstream и --upstream-key либо
+--upstream-routes и --upstream-route-keys для метки первого токена.
+В режиме oauth нужен ANTHROPIC_AUTH_TOKEN в окружении или файле настроек.
 
 Флаги:
 `)
@@ -78,7 +83,7 @@ func cmdLocal(args []string) error {
 		Stderr:     os.Stderr,
 		Environ:    os.Environ(),
 		Ready: func(baseURL string) {
-			fmt.Fprintf(os.Stderr, "локальное звено %s → %s, лог: %s\n", baseURL, plan.cfg.Upstream, *logFile)
+			fmt.Fprintf(os.Stderr, "локальное звено %s → %s, лог: %s\n", baseURL, plan.upstream, *logFile)
 		},
 	})
 	closeLog()
@@ -122,16 +127,24 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 	if err != nil {
 		return nil, err
 	}
-	if cfg.UpstreamKey == "" {
+
+	plan := &localPlan{cfg: cfg, upstream: cfg.Upstream.String()}
+	first, ok := cfg.Tokens.First()
+	if !ok {
+		return nil, errors.New("набор токенов звена пуст — конфигурация не должна была пройти проверку")
+	}
+	plan.token = first.Value
+	if rt := routeForLabel(cfg.Routes, first.Label); rt != nil {
+		plan.upstream = rt.Upstream.Host
+		if rt.Key == "" {
+			return nil, fmt.Errorf("локальное звено работает только в цепочке: задайте --upstream-route-keys "+
+				"или CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS для маршрута метки %q", first.Label)
+		}
+	} else if cfg.UpstreamKey == "" {
 		return nil, errors.New("локальное звено работает только в цепочке: задайте адрес и пропуск внешнего звена " +
-			"(--upstream и --upstream-key, или CLAUDE_PROXY_UPSTREAM и CLAUDE_PROXY_UPSTREAM_KEY в файле настроек)")
+			"(--upstream и --upstream-key, или --upstream-routes и --upstream-route-keys для метки " +
+			strconv.Quote(first.Label) + "; переменные CLAUDE_PROXY_* — в файле настроек)")
 	}
-
-	plan := &localPlan{cfg: cfg}
-	if first, ok := cfg.Tokens.First(); ok {
-		plan.token = first.Value
-	}
-
 	if cfg.Mode == config.ModeOAuth {
 		plan.authToken = getenv("ANTHROPIC_AUTH_TOKEN")
 		if plan.authToken == "" {
@@ -146,6 +159,16 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 	}
 	plan.claudePath = path
 	return plan, nil
+}
+
+// routeForLabel — маршрут метки токена; nil, если маршрута нет.
+func routeForLabel(routes []config.Route, label string) *config.Route {
+	for i := range routes {
+		if routes[i].Label == label {
+			return &routes[i]
+		}
+	}
+	return nil
 }
 
 // fileLogger — логгер звена в файл: каталог создаётся, файл дописывается.

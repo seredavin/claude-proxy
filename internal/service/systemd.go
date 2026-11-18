@@ -324,6 +324,8 @@ func envLines(raw config.Raw) []string {
 		{"CLAUDE_PROXY_ANTHROPIC_API_KEY", raw.APIKey},
 		{"CLAUDE_PROXY_UPSTREAM", raw.Upstream},
 		{"CLAUDE_PROXY_UPSTREAM_KEY", raw.UpstreamKey},
+		{"CLAUDE_PROXY_UPSTREAM_ROUTES", raw.UpstreamRoutes},
+		{"CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS", raw.UpstreamRouteKeys},
 		{"CLAUDE_PROXY_TLS", raw.TLS},
 		{"CLAUDE_PROXY_CERT_FILE", raw.CertFile},
 		{"CLAUDE_PROXY_KEY_FILE", raw.KeyFile},

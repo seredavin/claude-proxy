@@ -83,6 +83,10 @@ type Config struct {
 	// а ещё один claude-proxy. Уходит наверх в X-Gateway-Key.
 	UpstreamKey string
 
+	// Routes — маршруты апстримов по меткам токенов: запрос метки уходит
+	// на свой апстрим со своим пропуском. Пусто — все запросы на Upstream.
+	Routes []Route
+
 	TLS      TLSSource
 	CertFile string
 	KeyFile  string
@@ -118,23 +122,25 @@ type Config struct {
 // Raw — значения до разбора и валидации. Отдельный тип нужен подкоманде
 // install: ей важны исходные строки, а не готовый к запуску Config.
 type Raw struct {
-	Mode          string
-	Listen        string
-	Domain        string
-	Tokens        string
-	APIKey        string
-	Upstream      string
-	UpstreamKey   string
-	TLS           string
-	CertFile      string
-	KeyFile       string
-	ACMEEmail     string
-	ACMEHTTP      string
-	ACMEDirectory string
-	StateDir      string
-	MaxBody       string
-	LogFormat     string
-	MaskRules     string
+	Mode              string
+	Listen            string
+	Domain            string
+	Tokens            string
+	APIKey            string
+	Upstream          string
+	UpstreamKey       string
+	UpstreamRoutes    string
+	UpstreamRouteKeys string
+	TLS               string
+	CertFile          string
+	KeyFile           string
+	ACMEEmail         string
+	ACMEHTTP          string
+	ACMEDirectory     string
+	StateDir          string
+	MaxBody           string
+	LogFormat         string
+	MaskRules         string
 	// MaskOnError и MaskDebug пустые по умолчанию: так видно, задал ли их
 	// оператор явно — без файла правил они бессмысленны.
 	MaskOnError string
@@ -163,6 +169,8 @@ func (r *Raw) bindings() []binding {
 		{&r.APIKey, "api-key", []string{"CLAUDE_PROXY_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"}},
 		{&r.Upstream, "upstream", []string{"CLAUDE_PROXY_UPSTREAM"}},
 		{&r.UpstreamKey, "upstream-key", []string{"CLAUDE_PROXY_UPSTREAM_KEY"}},
+		{&r.UpstreamRoutes, "upstream-routes", []string{"CLAUDE_PROXY_UPSTREAM_ROUTES"}},
+		{&r.UpstreamRouteKeys, "upstream-route-keys", []string{"CLAUDE_PROXY_UPSTREAM_ROUTE_KEYS"}},
 		{&r.TLS, "tls", []string{"CLAUDE_PROXY_TLS"}},
 		{&r.CertFile, "cert-file", []string{"CLAUDE_PROXY_CERT_FILE", "PROXY_SSL_CERT"}},
 		{&r.KeyFile, "key-file", []string{"CLAUDE_PROXY_KEY_FILE", "PROXY_SSL_KEY"}},
@@ -222,6 +230,10 @@ func Bind(fs *flag.FlagSet) *Raw {
 	fs.StringVar(&r.Upstream, "upstream", d.Upstream, "базовый URL Anthropic API")
 	fs.StringVar(&r.UpstreamKey, "upstream-key", d.UpstreamKey,
 		"пропуск на следующий шлюз в цепочке; уходит наверх как X-Gateway-Key")
+	fs.StringVar(&r.UpstreamRoutes, "upstream-routes", d.UpstreamRoutes,
+		`маршруты апстримов по меткам токенов: "метка=https://host" через запятую`)
+	fs.StringVar(&r.UpstreamRouteKeys, "upstream-route-keys", d.UpstreamRouteKeys,
+		`пропуска апстримов маршрутов: "метка=значение" через запятую; наверх уходят как X-Gateway-Key`)
 	fs.StringVar(&r.TLS, "tls", d.TLS, "источник сертификата: auto | files | self | none (без TLS, только loopback)")
 	fs.StringVar(&r.CertFile, "cert-file", d.CertFile, "PEM с цепочкой сертификатов, для --tls files")
 	fs.StringVar(&r.KeyFile, "key-file", d.KeyFile, "PEM с приватным ключом, для --tls files")
@@ -383,6 +395,12 @@ func Resolve(r Raw) (*Config, error) {
 		return nil, fmt.Errorf("upstream должен быть https://host, получено %q", r.Upstream)
 	}
 	c.Upstream = upstream
+
+	routes, err := parseRoutes(strings.TrimSpace(r.UpstreamRoutes), strings.TrimSpace(r.UpstreamRouteKeys), tokens)
+	if err != nil {
+		return nil, err
+	}
+	c.Routes = routes
 
 	size, err := parseSize(r.MaxBody)
 	if err != nil {
