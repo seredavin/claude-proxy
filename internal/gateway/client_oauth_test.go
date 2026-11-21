@@ -145,6 +145,15 @@ func TestClientOAuthRelayAndInference(t *testing.T) {
 		t.Fatalf("два звена с обновлением: %d, запросов %d", reply.Code, upstreamCalls)
 	}
 
+	native := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"alias","stream":true,"input":"hello"}`))
+	native.Header.Set("X-Gateway-Key", "launch-key")
+	native.Header.Set("Authorization", "Bearer local-placeholder")
+	reply = httptest.NewRecorder()
+	local.ServeHTTP(reply, native)
+	if reply.Code != 200 || upstreamCalls != 6 || !strings.Contains(reply.Body.String(), "response.completed") {
+		t.Fatalf("нативный Responses через два звена: %d, запросов %d, ответ %s", reply.Code, upstreamCalls, reply.Body)
+	}
+
 	files, _ = os.ReadDir(dir)
 	for _, f := range files {
 		data, err := os.ReadFile(dir + "/" + f.Name())

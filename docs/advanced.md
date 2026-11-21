@@ -398,6 +398,36 @@ UTF-8. Параметры генерации, отсутствующие в prev
 Встроенные инструменты Anthropic и прочие нетекстовые блоки вызывают ошибку
 совместимости. [Ограничения OpenAI Responses API](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 
+#### OpenCode через нативный Responses API
+
+С установленным OpenCode 2.x и настроенным маршрутом ChatGPT запустите:
+
+```bash
+claude-proxy local --env-file openai.env --client opencode
+claude-proxy local --env-file openai.env --client opencode -- run "Объясни структуру этого проекта"
+```
+
+Для профиля ChatGPT на этой машине можно вместо файла указать
+`--openai-upstream 'personal:<модель>'`. Если OpenAI находится на внешнем
+шлюзе, используйте существующие параметры `--upstream-chatgpt` или
+`--upstream-chatgpt-profile` и обновите внешнее звено до версии с
+`POST /v1/responses`.
+
+Лаунчер запускает OpenCode с отдельным локальным процессом OpenCode
+(`--standalone`). Он передаёт фактический адрес прокси, пропуск и модели
+в `OPENCODE_CONFIG_CONTENT` дочернего процесса. OpenCode выбирает первую
+настроенную модель. Для выбора другой используйте `/models` или
+`run --model claude-proxy/<псевдоним>`. Если бинарник OpenCode отсутствует
+в `PATH`, укажите `--opencode /путь/к/opencode`.
+
+Клиент обращается к `POST /v1/responses` и получает поток событий Responses.
+При прямом запросе к этому маршруту передайте `X-Gateway-Key`,
+`stream: true`, модель и полную историю в `input`. Прокси задаёт
+`store: false` и преобразует объявления локальных инструментов в
+`additional_tools` для ChatGPT. Доступность встроенных инструментов
+зависит от модели и аккаунта.
+[Ограничения Responses API по подписке ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+
 #### OpenAI на удалённом шлюзе
 
 На сервере добавьте отдельный токен и маршрут OpenAI в

@@ -37,11 +37,11 @@ type localPlan struct {
 func cmdLocal(args []string) error {
 	fs := flag.NewFlagSet("local", flag.ExitOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `Использование: claude-proxy local [флаги] [-- аргументы claude]
+		fmt.Fprintf(fs.Output(), `Использование: claude-proxy local [флаги] [-- аргументы клиента]
 
-Поднимает локальное звено без TLS на loopback, запускает claude с
-переменными на это звено и гасит звено по выходу claude. Всё после флагов
-(или после --) уходит claude как есть.
+Поднимает звено без TLS на loopback, запускает выбранного клиента
+и останавливает звено по его выходу. Аргументы после -- получает клиент.
+OpenCode использует нативный Responses API на маршруте ChatGPT.
 
 Для внешнего звена задайте --upstream и --upstream-key либо
 --upstream-routes и --upstream-route-keys для метки первого токена.
@@ -56,7 +56,9 @@ func cmdLocal(args []string) error {
 	}
 	raw := config.Bind(fs)
 	envFile := fs.String("env-file", localConfigFile(), "файл настроек; отсутствие — не ошибка")
+	client := fs.String("client", "claude", "клиент локального звена: claude или opencode")
 	claude := fs.String("claude", "claude", "исполняемый файл claude")
+	opencode := fs.String("opencode", "opencode", "исполняемый файл opencode")
 	fs.String("upstream-chatgpt", "", "внешний шлюз использует ChatGPT для выбранного пропуска (true/false)")
 	fs.String("upstream-chatgpt-profile", "", "локальный профиль ChatGPT для обновления через внешний шлюз")
 	logFile := fs.String("log-file", localLogFile(), "лог звена; в терминал он не пишется")
@@ -68,7 +70,16 @@ func cmdLocal(args []string) error {
 	if err != nil {
 		return err
 	}
-	plan, err := planLocal(raw, fs, getenv, *claude, exec.LookPath)
+	var executable string
+	switch *client {
+	case "claude":
+		executable = *claude
+	case "opencode":
+		executable = *opencode
+	default:
+		return fmt.Errorf("--client: ожидается claude или opencode")
+	}
+	plan, err := planLocal(raw, fs, getenv, executable, exec.LookPath)
 	if err != nil {
 		return err
 	}
@@ -105,6 +116,7 @@ func cmdLocal(args []string) error {
 		ChatGPTToken: profiles.AccessToken,
 		ClaudePath:   plan.claudePath,
 		ClaudeArgs:   fs.Args(),
+		OpenCode:     *client == "opencode",
 		Stdin:        os.Stdin,
 		Stdout:       os.Stdout,
 		Stderr:       os.Stderr,
@@ -218,6 +230,10 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 			return nil, err
 		}
 	}
+	if client := fs.Lookup("client"); client != nil && client.Value.String() == "opencode" &&
+		openAI == nil && cfg.ChatGPTChainLabel == "" {
+		return nil, errors.New("--client opencode требует маршрут ChatGPT: задайте --openai-upstream, --openai-routes или --upstream-chatgpt")
+	}
 	if cfg.Mode == config.ModeOAuth && openAI == nil && cfg.ChatGPTChainLabel == "" {
 		plan.authToken = getenv("ANTHROPIC_AUTH_TOKEN")
 		if plan.authToken == "" {
@@ -228,7 +244,11 @@ func planLocal(raw *config.Raw, fs *flag.FlagSet, getenv config.Getenv, claude s
 
 	path, err := lookPath(claude)
 	if err != nil {
-		return nil, fmt.Errorf("не найден %s (ищется в PATH; путь можно задать флагом --claude): %w", claude, err)
+		pathFlag := "--claude"
+		if client := fs.Lookup("client"); client != nil && client.Value.String() == "opencode" {
+			pathFlag = "--opencode"
+		}
+		return nil, fmt.Errorf("не найден %s (ищется в PATH; путь можно задать флагом %s): %w", claude, pathFlag, err)
 	}
 	plan.claudePath = path
 	return plan, nil
