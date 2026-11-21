@@ -435,3 +435,39 @@ func TestEnvironDiscoversModelsForSelectedOpenAIRoute(t *testing.T) {
 	check("gpt-token", "1")
 	check("claude-token", "0")
 }
+
+func TestRunOpenCodeWithDiscoveredModels(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" || r.Header.Get("X-Gateway-Key") != "EDGE" || r.Header.Get("Authorization") != "" {
+			t.Error("неверный запрос каталога цепочки")
+		}
+		_, _ = io.WriteString(w, `{"data":[{"id":"claude-gpt-fast","display_name":"gpt-fast"}]}`)
+	}))
+	defer stub.Close()
+	cfg := testConfig(t, stub.URL)
+	cfg.ChatGPTChainLabel = "local"
+	out := filepath.Join(t.TempDir(), "env")
+	var baseURL string
+	code, err := Run(context.Background(), Options{
+		Config: cfg, Logger: discardLogger(), Token: "secret", OpenCode: true,
+		ClaudePath: os.Args[0], ClaudeArgs: []string{"run", "hello"},
+		Environ: helperEnv("env", out, "OPENCODE_CONFIG_CONTENT=stale"),
+		Ready:   func(url string) { baseURL = url },
+	})
+	if err != nil || code != 0 {
+		t.Fatalf("Run: код %d, ошибка %v", code, err)
+	}
+	env := waitFile(t, out)
+	for _, value := range []string{
+		"ARGS=--standalone run hello", `"baseURL":"` + baseURL + `/v1"`,
+		`"model":"claude-proxy/gpt-fast"`, `"modelID":"claude-gpt-fast"`,
+		`"X-Gateway-Key":"secret"`, `"store":false`, "@opencode/ai/providers/openai-compatible/responses",
+	} {
+		if !strings.Contains(env, value) {
+			t.Errorf("в окружении OpenCode отсутствует %q", value)
+		}
+	}
+	if strings.Count(env, "OPENCODE_CONFIG_CONTENT=") != 1 {
+		t.Error("ожидалась одна конфигурация OpenCode")
+	}
+}

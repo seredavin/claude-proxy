@@ -22,6 +22,12 @@ func addTagsHint(root any) {
 		return
 	}
 	if _, ok := body["messages"]; !ok {
+		if _, native := body["input"]; native {
+			instructions, _ := body["instructions"].(string)
+			if !strings.HasSuffix(instructions, tagsHint) {
+				body["instructions"] = strings.TrimSpace(instructions + "\n\n" + tagsHint)
+			}
+		}
 		return
 	}
 	block := map[string]any{"type": "text", "text": tagsHint}

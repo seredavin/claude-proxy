@@ -41,6 +41,7 @@ func (st *Stats) Categories() []string {
 var skipKeys = map[string]bool{
 	"model": true, "type": true, "role": true, "id": true, "tool_use_id": true,
 	"name": true, "signature": true, "media_type": true,
+	"call_id": true, "item_id": true, "encrypted_content": true,
 }
 
 // walkMode — что делать со строками поддерева.
@@ -119,7 +120,8 @@ func encode(root any) ([]byte, error) {
 func (s *Session) walk(v any, mode walkMode, st *Stats) error {
 	switch node := v.(type) {
 	case map[string]any:
-		if t, _ := node["type"].(string); t == "redacted_thinking" {
+		kind, _ := node["type"].(string)
+		if kind == "redacted_thinking" {
 			return nil
 		}
 		childMode := mode
@@ -141,6 +143,13 @@ func (s *Session) walk(v any, mode walkMode, st *Stats) error {
 			}
 			switch c := child.(type) {
 			case string:
+				if childMode == modeReverse && k == "arguments" &&
+					(kind == "function_call" || kind == "response.function_call_arguments.done") {
+					out, n := s.unmaskText(c, jsonEscape)
+					node[k] = out
+					st.Unmasked += n
+					continue
+				}
 				out, err := s.rewrite(c, childMode, st)
 				if err != nil {
 					return err

@@ -38,8 +38,9 @@ type Stream struct {
 	br  *bufio.Reader
 	log *slog.Logger
 
-	out  bytes.Buffer
-	held map[int64]*heldBlock
+	out           bytes.Buffer
+	held          map[int64]*heldBlock
+	responsesHeld map[responseDeltaKey]map[string]any
 	// done — источник исчерпан (err — чем именно; io.EOF при штатном конце).
 	done bool
 	err  error
@@ -105,6 +106,7 @@ func (st *Stream) nextEvent() {
 				st.processEvent(lines)
 			}
 			st.flushAll()
+			st.flushResponseDeltas()
 			st.done = true
 			st.err = err
 			return
@@ -151,16 +153,22 @@ func (st *Stream) processEvent(lines []string) {
 		if idx, ok := blockIndex(obj); ok {
 			st.flushBlock(idx)
 		}
+	case "response.output_text.delta", "response.refusal.delta", "response.reasoning_text.delta",
+		"response.reasoning_summary_text.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+		st.rewriteResponseDelta(kind, obj)
+	case "response.output_text.done", "response.refusal.done", "response.reasoning_text.done",
+		"response.reasoning_summary_text.done", "response.function_call_arguments.done", "response.custom_tool_call_input.done":
+		st.flushResponseDelta(responseKey(strings.TrimSuffix(kind, ".done")+".delta", obj))
+		st.unmaskEvent(obj)
+	case "response.completed", "response.incomplete", "response.failed":
+		st.flushResponseDeltas()
+		st.unmaskEvent(obj)
 	case "message_stop", "error":
 		st.flushAll()
+		st.flushResponseDeltas()
+		st.unmaskEvent(obj)
 	default:
-		var s Stats
-		if err := st.s.walk(obj, modeReverse, &s); err != nil {
-			st.fail("событие SSE не переписалось, передано как есть", err)
-			st.writeLines(lines)
-			return
-		}
-		st.count(s.Unmasked)
+		st.unmaskEvent(obj)
 	}
 
 	encoded, err := encode(obj)
@@ -298,4 +306,73 @@ func jsonEscape(s string) string {
 	_ = enc.Encode(s)
 	b := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 	return string(b[1 : len(b)-1])
+}
+
+func (st *Stream) unmaskEvent(obj map[string]any) {
+	var stats Stats
+	if err := st.s.walk(obj, modeReverse, &stats); err != nil {
+		st.fail("событие SSE не переписалось", err)
+	}
+	st.count(stats.Unmasked)
+}
+
+type responseDeltaKey struct {
+	kind, item    string
+	index, output json.Number
+}
+
+func responseKey(kind string, obj map[string]any) responseDeltaKey {
+	item, _ := obj["item_id"].(string)
+	index, ok := obj["content_index"].(json.Number)
+	if !ok {
+		index, _ = obj["summary_index"].(json.Number)
+	}
+	output, _ := obj["output_index"].(json.Number)
+	return responseDeltaKey{kind, item, index, output}
+}
+
+func (st *Stream) rewriteResponseDelta(kind string, obj map[string]any) {
+	text, ok := obj["delta"].(string)
+	if !ok {
+		return
+	}
+	key := responseKey(kind, obj)
+	if previous := st.responsesHeld[key]; previous != nil {
+		text = previous["delta"].(string) + text
+		delete(st.responsesHeld, key)
+	}
+	tail := st.s.heldTail(text)
+	var escape func(string) string
+	if kind == "response.function_call_arguments.delta" {
+		escape = jsonEscape
+	}
+	out, n := st.s.unmaskText(text[:len(text)-len(tail)], escape)
+	st.count(n)
+	if tail != "" {
+		if st.responsesHeld == nil {
+			st.responsesHeld = make(map[responseDeltaKey]map[string]any)
+		}
+		event := make(map[string]any, len(obj))
+		for k, value := range obj {
+			event[k] = value
+		}
+		event["delta"] = tail
+		st.responsesHeld[key] = event
+	}
+	obj["delta"] = out
+}
+
+func (st *Stream) flushResponseDelta(key responseDeltaKey) {
+	if event := st.responsesHeld[key]; event != nil {
+		delete(st.responsesHeld, key)
+		if encoded, err := encode(event); err == nil {
+			st.writeLines([]string{"event: " + key.kind, "data: " + string(encoded)})
+		}
+	}
+}
+
+func (st *Stream) flushResponseDeltas() {
+	for key := range st.responsesHeld {
+		st.flushResponseDelta(key)
+	}
 }

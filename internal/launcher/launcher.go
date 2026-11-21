@@ -43,6 +43,8 @@ type Options struct {
 	ClaudePath string
 	// ClaudeArgs — его аргументы как есть.
 	ClaudeArgs []string
+	// OpenCode выбирает провайдер Responses в окружении дочернего процесса.
+	OpenCode bool
 
 	// Потоки для claude: терминал наследуется.
 	Stdin  io.Reader
@@ -94,13 +96,24 @@ func Run(ctx context.Context, o Options) (int, error) {
 		o.Ready(baseURL)
 	}
 
-	// Переменные звена считаем от фактического адреса: в конфигурации мог
-	// быть порт 0.
-	envCfg := *o.Config
-	envCfg.Listen = addr.String()
-
-	cmd := exec.Command(o.ClaudePath, o.ClaudeArgs...)
-	cmd.Env = Environ(o.Environ, &envCfg, o.Token, o.AuthToken)
+	args := o.ClaudeArgs
+	var env []string
+	if o.OpenCode {
+		args = append([]string{"--standalone"}, args...)
+		var err error
+		env, err = openCodeEnviron(ctx, o.Environ, o.Config, baseURL, o.Token)
+		if err != nil {
+			stopGateway()
+			<-gwDone
+			return 1, err
+		}
+	} else {
+		envCfg := *o.Config
+		envCfg.Listen = addr.String()
+		env = Environ(o.Environ, &envCfg, o.Token, o.AuthToken)
+	}
+	cmd := exec.Command(o.ClaudePath, args...)
+	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = o.Stdin, o.Stdout, o.Stderr
 
 	// Подписка, а не signal.Ignore: SIG_IGN пережил бы exec и достался

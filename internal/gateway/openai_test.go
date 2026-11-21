@@ -276,3 +276,63 @@ func TestLocalChainUsesOnlyRemoteOpenAIRouteKey(t *testing.T) {
 		t.Fatalf("неожиданные обращения в OpenAI: %v", called)
 	}
 }
+
+func TestNativeResponses(t *testing.T) {
+	tokens, _ := auth.Parse("openai:gateway")
+	upstream, _ := url.Parse(config.OpenAIResponsesURL)
+	wire := "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"resp_test\",\"output\":[]}}\n\n"
+	calls := 0
+	gw := New(Options{
+		Mode: config.ModeOAuth, Tokens: tokens, Upstream: upstream,
+		OpenAI:       &config.OpenAITarget{Profile: "personal", Models: []config.OpenAIModel{{Alias: "fast", Model: "gpt-test"}}},
+		ChatGPTToken: func(context.Context, string) (string, error) { return "session-token", nil },
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			defer req.Body.Close()
+			calls++
+			if req.URL.String() != config.OpenAIResponsesURL || req.Header.Get("Authorization") != "Bearer session-token" ||
+				req.Header.Get("X-Gateway-Key") != "" {
+				t.Error("неверная авторизация апстрима")
+			}
+			var fields map[string]json.RawMessage
+			if err := json.NewDecoder(req.Body).Decode(&fields); err != nil {
+				t.Fatal(err)
+			}
+			var input []map[string]json.RawMessage
+			if err := json.Unmarshal(fields["input"], &input); err != nil {
+				t.Fatal(err)
+			}
+			if string(fields["model"]) != `"gpt-test"` || string(fields["stream"]) != "true" || string(fields["store"]) != "false" ||
+				fields["max_output_tokens"] != nil || fields["tools"] != nil {
+				t.Errorf("неверные поля Responses: %v", fields)
+			}
+			if len(input) != 4 || string(input[0]["type"]) != `"additional_tools"` ||
+				string(input[1]["role"]) != `"developer"` ||
+				string(input[2]["call_id"]) != `"call_test"` ||
+				string(input[3]["call_id"]) != `"call_test"` || string(input[3]["output"]) != `"file body"` {
+				t.Fatalf("потеряна история инструмента: %v", input)
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(wire))}, nil
+		}),
+	})
+	request := func(body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+		r.Header.Set("X-Gateway-Key", "gateway")
+		w := httptest.NewRecorder()
+		gw.ServeHTTP(w, r)
+		return w
+	}
+	for _, field := range []string{`"previous_response_id":"resp_old"`, `"conversation":"conv_old"`} {
+		w := request(`{"stream":true,"model":"fast","input":"hello",` + field + `}`)
+		if w.Code != 400 || calls != 0 {
+			t.Fatalf("ожидался локальный отказ с HTTP 400: %d, запросов %d", w.Code, calls)
+		}
+	}
+	w := request(`{"stream":true,"store":true,"model":"fast","max_output_tokens":2048,
+		"tools":[{"type":"function","name":"read","parameters":{"type":"object"}}],
+		"input":[{"type":"message","role":"system","content":"instructions"},
+		{"type":"function_call","call_id":"call_test","name":"read","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_test","output":"file body"}]}`)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "text/event-stream" || w.Body.String() != wire || calls != 1 {
+		t.Fatalf("неверный ответ: %d %s, запросов %d", w.Code, w.Body, calls)
+	}
+}

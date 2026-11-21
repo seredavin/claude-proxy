@@ -270,7 +270,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if g.isChatGPTChain(label) {
 		r.Header.Del("Authorization")
 		r.Header.Del("X-Api-Key")
-		if g.chatGPTChainProfile != "" && r.Method == http.MethodPost && r.URL.Path == "/v1/messages" {
+		if g.chatGPTChainProfile != "" && r.Method == http.MethodPost && (r.URL.Path == "/v1/messages" || r.URL.Path == responses.Path) {
 			if g.chatGPTToken == nil {
 				writeError(rec, http.StatusServiceUnavailable, "api_error", "профиль ChatGPT недоступен")
 				return

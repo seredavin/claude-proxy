@@ -70,16 +70,32 @@ func (a Adapter) RoundTrip(req *http.Request, target *config.OpenAITarget, trace
 	if req.Method == http.MethodGet && req.URL.Path == "/v1/models" {
 		return listModels(req, target), nil
 	}
-	if req.Method != http.MethodPost || (req.URL.Path != "/v1/messages" && req.URL.Path != "/v1/messages/count_tokens") {
-		return jsonResponse(req, 404, errorMessage("not_found_error", "маршрут OpenAI поддерживает только Messages, count_tokens и Models")), nil
+	native := req.URL.Path == Path
+	if req.Method != http.MethodPost || (!native && req.URL.Path != "/v1/messages" && req.URL.Path != "/v1/messages/count_tokens") {
+		return jsonResponse(req, 404, errorMessage("not_found_error", "маршрут OpenAI поддерживает Messages, count_tokens, Models и Responses")), nil
 	}
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
 	}
-	client, payload, err := convertRequest(body, target)
-	if err != nil {
-		return jsonResponse(req, 400, errorMessage("invalid_request_error", err.Error())), nil
+	var client messageRequest
+	var payload []byte
+	if native {
+		payload, err = nativeRequest(body, target)
+		if err != nil {
+			return nativeError(req, 400, "invalid_request_error", err.Error()), nil
+		}
+	} else {
+		client, payload, err = convertRequest(body, target)
+		if err != nil {
+			return jsonResponse(req, 400, errorMessage("invalid_request_error", err.Error())), nil
+		}
+	}
+	respondError := func(status int, kind, message string) *http.Response {
+		if native {
+			return nativeError(req, status, kind, message)
+		}
+		return jsonResponse(req, status, errorMessage(kind, message))
 	}
 	if req.URL.Path == "/v1/messages/count_tokens" {
 		// Оценка по UTF-8 сериализованного запроса.
@@ -95,15 +111,15 @@ func (a Adapter) RoundTrip(req *http.Request, target *config.OpenAITarget, trace
 			}
 		}
 		if token == "" {
-			return jsonResponse(req, 401, errorMessage("authentication_error", "требуется клиентский OAuth Bearer OpenAI")), nil
+			return respondError(401, "authentication_error", "требуется клиентский OAuth Bearer OpenAI"), nil
 		}
 	} else {
 		if a.AccessToken == nil {
-			return jsonResponse(req, 503, errorMessage("api_error", "профиль ChatGPT недоступен")), nil
+			return respondError(503, "api_error", "профиль ChatGPT недоступен"), nil
 		}
 		token, err = a.AccessToken(req.Context(), target.Profile)
 		if err != nil {
-			return jsonResponse(req, 503, errorMessage("api_error", "профиль ChatGPT недоступен, проверьте локальный вход")), nil
+			return respondError(503, "api_error", "профиль ChatGPT недоступен, проверьте локальный вход"), nil
 		}
 	}
 	out, err := http.NewRequestWithContext(req.Context(), http.MethodPost, config.OpenAIResponsesURL, bytes.NewReader(payload))
@@ -123,6 +139,30 @@ func (a Adapter) RoundTrip(req *http.Request, target *config.OpenAITarget, trace
 	var stream io.Reader = upstream.Body
 	if trace != nil {
 		stream = trace.Response(upstream.Header, stream)
+	}
+	if native {
+		if upstream.StatusCode == http.StatusUnauthorized {
+			defer upstream.Body.Close()
+			_, _ = io.Copy(io.Discard, io.LimitReader(stream, 1<<20))
+			return respondError(401, "authentication_error", "OpenAI отклонил токен профиля, проверьте локальный вход"), nil
+		}
+		contentType := upstream.Header.Get("Content-Type")
+		if upstream.StatusCode == http.StatusOK {
+			if contentType != "" && !isEventStream(contentType) {
+				upstream.Body.Close()
+				return nil, errors.New("OpenAI вернул ответ без потока событий")
+			}
+			contentType = "text/event-stream"
+		}
+		if contentType == "" {
+			contentType = "application/json"
+		}
+		header := http.Header{"Content-Type": {contentType}}
+		if value := upstream.Header.Get("Retry-After"); value != "" {
+			header.Set("Retry-After", value)
+		}
+		return &http.Response{StatusCode: upstream.StatusCode, Header: header,
+			Request: req, ContentLength: -1, Body: &nativeBody{Reader: stream, Closer: upstream.Body}}, nil
 	}
 	if upstream.StatusCode != http.StatusOK {
 		defer upstream.Body.Close()
@@ -203,4 +243,9 @@ type streamBody struct {
 func (s *streamBody) Close() error {
 	_ = s.PipeReader.Close()
 	return s.upstream.Close()
+}
+
+type nativeBody struct {
+	io.Reader
+	io.Closer
 }

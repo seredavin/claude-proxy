@@ -264,3 +264,33 @@ func TestМеткиНеТрогаютсяДетекторами(t *testing.T) {
 		t.Errorf("метка тронута: %s %v", out, st.Masked)
 	}
 }
+
+func TestResponsesToolArgumentsSplitAcrossEvents(t *testing.T) {
+	k := testKey(t)
+	session := newTagSession(t, "", k)
+	const original = `he said "hi"\`
+	tag := k.sealTag(categorySecret, original)
+	const kind = "response.function_call_arguments.delta"
+	deltaEvent := func(sequence int, text string) string {
+		body, _ := json.Marshal(map[string]any{
+			"type": kind, "sequence_number": sequence, "item_id": "fc_test", "output_index": 0, "delta": text,
+		})
+		return "event: " + kind + "\ndata: " + string(body)
+	}
+	wire := sse(deltaEvent(1, `{"text":"`+tag[:8]), deltaEvent(2, tag[8:]+`"}`))
+	out := readAll(t, session.UnmaskStream(io.NopCloser(strings.NewReader(wire))))
+	var joined strings.Builder
+	for _, line := range strings.Split(out, "\n") {
+		if data, ok := strings.CutPrefix(line, "data: "); ok {
+			var event struct{ Delta string }
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				t.Fatal(err)
+			}
+			joined.WriteString(event.Delta)
+		}
+	}
+	var args struct{ Text string }
+	if err := json.Unmarshal([]byte(joined.String()), &args); err != nil || args.Text != original {
+		t.Fatalf("аргументы функции: %q, %v", joined.String(), err)
+	}
+}
